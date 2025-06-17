@@ -61,6 +61,11 @@ bool MosaicBuilder::stitchImages(cv::Mat& outputMosaic) {
         return false;
     }
 
+    // transparent bg
+    cv::Mat refImageRGBA, targetImageRGBA;
+    cv::cvtColor(refImage, refImageRGBA, cv::COLOR_BGR2BGRA);
+    cv::cvtColor(targetImage, targetImageRGBA, cv::COLOR_BGR2BGRA);
+
     std::vector<cv::Point2f> corners = {
         {0, 0},
         {static_cast<float>(targetImage.cols), 0},
@@ -74,24 +79,39 @@ bool MosaicBuilder::stitchImages(cv::Mat& outputMosaic) {
     cv::Mat translation;
     computeBoundingBox(warpedCorners, width, height, translation);
 
-    cv::Mat warped;
-    cv::warpPerspective(targetImage, warped, translation * homography, cv::Size(width, height));
+    cv::Mat transparentMosaic(height, width, CV_8UC4, cv::Scalar(0, 0, 0, 0));
 
-    outputMosaic = warped.clone();
+    cv::Mat warpedRGBA;
+cv::warpPerspective(targetImageRGBA, warpedRGBA, translation * homography, cv::Size(width, height),
+                    cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));  // Transparent border
+
+    std::vector<cv::Mat> channels;
+    cv::split(warpedRGBA, channels); // channels[3] is alpha
+    cv::Mat mask = channels[3] > 0;
+    warpedRGBA.copyTo(transparentMosaic, mask);
+
     int x = static_cast<int>(translation.at<double>(0, 2));
     int y = static_cast<int>(translation.at<double>(1, 2));
     std::cout << "x: " << x << ", y: " << y << '\n';
 
     if (x >= 0 && y >= 0 &&
-        x + refImage.cols <= outputMosaic.cols &&
-        y + refImage.rows <= outputMosaic.rows) {
-        cv::Mat roi = outputMosaic(cv::Rect(x, y, refImage.cols, refImage.rows));
-        refImage.copyTo(roi);
+        x + refImage.cols <= transparentMosaic.cols &&
+        y + refImage.rows <= transparentMosaic.rows) {
+        cv::Mat roi = transparentMosaic(cv::Rect(x, y, refImageRGBA.cols, refImageRGBA.rows));
+            for (int r = 0; r < refImageRGBA.rows; ++r) {
+                for (int c = 0; c < refImageRGBA.cols; ++c) {
+                    cv::Vec4b srcPixel = refImageRGBA.at<cv::Vec4b>(r, c);
+                    if (srcPixel[3] > 0) {
+                        roi.at<cv::Vec4b>(r, c) = srcPixel;
+                    }
+                }
+            }
+            
     } else {
         std::cerr << "ERROR: Reference image ROI is out of bounds. Adjust bounding box or translation.\n";
         return false;
     }
-  // naive overlay — optionally add blending
 
+    outputMosaic = transparentMosaic;
     return true;
 }
