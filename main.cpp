@@ -1,3 +1,4 @@
+#include <csignal>
 #include <iostream>
 #include <filesystem>
 #include <fstream>
@@ -5,201 +6,141 @@
 #include <mutex>
 #include <chrono>
 #include <set>
-#include <opencv4/opencv2/opencv.hpp>
+#include <vector>
+#include <cstdlib>
+#include <sstream>
+#include <condition_variable>
 #include <gdal/gdal_priv.h>
 #include <gdal/ogr_spatialref.h>
 
 namespace fs = std::filesystem;
 
-cv::Mat canvas;
-std::mutex canvasMutex;
+std::mutex mosaicMutex;
+std::condition_variable batchFinished;
+bool stopSignal = false;
 
-double pixelSize = 0.2; // meters per pixel
-int canvasWidth = 10000, canvasHeight = 10000;
-double originX = 0.0, originY = 0.0;
-bool canvasInitialized = false;
+const std::string INCOMING = "incoming";
+const std::string BATCHES = "batches";
+const std::string STITCHED = "stitched/final_orthophoto.tif";
+const int BATCH_SIZE = 5;
 
-// Global lat/lon reference for UTM zone calculation
-double referenceLat = 0.0, referenceLon = 0.0;
-
-bool exifToGPS(const std::string& path, double& lat, double& lon) {
-    std::string cmd = "exiftool -n -GPSLatitude -GPSLongitude \"" + path + "\"";
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) return false;
-
-    char buffer[256];
-    std::string line;
-    bool foundLat = false, foundLon = false;
-
-    while (fgets(buffer, sizeof(buffer), pipe)) {
-        line = buffer;
-
-        if (line.find("GPS Latitude") != std::string::npos) {
-            try {
-                lat = std::stod(line.substr(line.find(":") + 1));
-                foundLat = true;
-            } catch (...) {
-                pclose(pipe);
-                return false;
-            }
-        }
-
-        if (line.find("GPS Longitude") != std::string::npos) {
-            try {
-                lon = std::stod(line.substr(line.find(":") + 1));
-                foundLon = true;
-            } catch (...) {
-                pclose(pipe);
-                return false;
-            }
-        }
-    }
-
-    pclose(pipe);
-    return foundLat && foundLon;
+void init_dirs() {
+    fs::create_directories(INCOMING);
+    fs::create_directories(BATCHES);
+    fs::create_directories("stitched");
 }
 
-bool coordsToUTM(double lat, double lon, double& x, double& y) {
-    OGRSpatialReference srcSRS, dstSRS;
-    srcSRS.SetWellKnownGeogCS("WGS84");
-    int utmZone = static_cast<int>((lon + 180) / 6) + 1;
-    dstSRS.SetUTM(utmZone, lat >= 0);
-
-    OGRCoordinateTransformation* transform = OGRCreateCoordinateTransformation(&srcSRS, &dstSRS);
-    if (!transform) return false;
-
-    x = lon;
-    y = lat;
-    if (!transform->Transform(1, &x, &y)) return false;
-
-    OCTDestroyCoordinateTransformation(transform);
-    return true;
+fs::path create_batch(const std::vector<fs::path>& images, int batch_id) {
+    std::stringstream ss;
+    ss << "batch_" << std::setw(3) << std::setfill('0') << batch_id;
+    fs::path batch_path = BATCHES + '/' + ss.str() + '/' + "images";
+    fs::create_directories(batch_path);
+    for (const auto& img : images) {
+        fs::rename(img, batch_path / img.filename());
+    }
+    return batch_path.parent_path();
 }
 
-void placeImage(const std::string& imagePath) {
-    double lat, lon, x, y;
-
-    if (!exifToGPS(imagePath, lat, lon)) {
-        std::cerr << "[ERROR] GPS not found: " << imagePath << "\n";
-        return;
+void run_odm_batch(const fs::path& batch_path) {
+    std::string abs_path = fs::absolute(batch_path).string();
+    std::string cmd = "docker run --rm -v \"" + abs_path +
+                      "\":/datasets/project opendronemap/odm "
+                      "--project-path /datasets project "
+                      "--fast-orthophoto --skip-3dmodel";
+    std::cout << "[ODM] Running: " << cmd << "\n";
+    int result = std::system(cmd.c_str());
+    if (result != 0) {
+        std::cerr << "[ODM] Batch failed: " << batch_path << "\n";
+    } else {
+        std::cout << "[ODM] Batch complete: " << batch_path << "\n";
     }
-
-    if (!coordsToUTM(lat, lon, x, y)) {
-        std::cerr << "[ERROR] Failed to convert coordinates.\n";
-        return;
-    }
-
-    cv::Mat img = cv::imread(imagePath);
-    if (img.empty()) {
-        std::cerr << "[ERROR] Failed to load image: " << imagePath << "\n";
-        return;
-    }
-
-    std::lock_guard<std::mutex> lock(canvasMutex);
-
-    if (!canvasInitialized) {
-        originX = x - canvasWidth * pixelSize / 2;
-        originY = y + canvasHeight * pixelSize / 2;
-        referenceLat = lat;
-        referenceLon = lon;
-        canvas = cv::Mat::zeros(canvasHeight, canvasWidth, CV_8UC3);
-        canvasInitialized = true;
-    }
-
-    int px = static_cast<int>((x - originX) / pixelSize);
-    int py = static_cast<int>((originY - y) / pixelSize);
-
-    if (px < 0 || py < 0 || px >= canvas.cols || py >= canvas.rows) {
-        std::cerr << "[WARN] Image out of bounds: " << imagePath << "\n";
-        return;
-    }
-
-    int roiWidth = std::min(img.cols, canvas.cols - px);
-    int roiHeight = std::min(img.rows, canvas.rows - py);
-
-    if (roiWidth <= 0 || roiHeight <= 0) return;
-
-    cv::Mat roi = canvas(cv::Rect(px, py, roiWidth, roiHeight));
-    img(cv::Rect(0, 0, roiWidth, roiHeight)).copyTo(roi);
-    std::cout << "[OK] Placed: " << imagePath << " at " << x << "," << y << "\n";
 }
 
-void save_geotiff(const std::string& output_path) {
-    std::lock_guard<std::mutex> lock(canvasMutex);
-    if (!canvasInitialized) return;
+void merge_orthophoto(const std::string& ortho_path, const std::string& mosaic_path) {
+    std::lock_guard<std::mutex> lock(mosaicMutex);
 
     GDALAllRegister();
-    const char* format = "GTiff";
-    GDALDriver* driver = GetGDALDriverManager()->GetDriverByName(format);
-    if (!driver) return;
+    GDALDataset* src = (GDALDataset*)GDALOpen(ortho_path.c_str(), GA_ReadOnly);
+    if (!src) {
+        std::cerr << "[GDAL] Failed to open: " << ortho_path << "\n";
+        return;
+    }
 
-    char** papszOptions = NULL;
-    GDALDataset* dst = driver->Create(output_path.c_str(), canvas.cols, canvas.rows, 3, GDT_Byte, papszOptions);
-    if (!dst) return;
+    if (!fs::exists(mosaic_path)) {
+        GDALDriver* driver = GetGDALDriverManager()->GetDriverByName("GTiff");
+        char** papszOptions = NULL;
+        GDALDataset* dst = driver->CreateCopy(mosaic_path.c_str(), src, FALSE, papszOptions, NULL, NULL);
+        if (dst) {
+            GDALClose(dst);
+        } else {
+            std::cerr << "[GDAL] Failed to create mosaic copy.\n";
+        }
 
-    double geoTransform[6] = {
-        originX, pixelSize, 0,
-        originY, 0, -pixelSize
-    };
-    dst->SetGeoTransform(geoTransform);
-
-    int utmZone = static_cast<int>((referenceLon + 180) / 6) + 1;
-    OGRSpatialReference srs;
-    srs.SetUTM(utmZone, referenceLat >= 0);
-    srs.SetWellKnownGeogCS("WGS84");
-
-    char* wkt;
-    srs.exportToWkt(&wkt);
-    dst->SetProjection(wkt);
-    CPLFree(wkt);
-
-    // Convert canvas from BGR to RGB
-    cv::Mat canvasRGB;
-    cv::cvtColor(canvas, canvasRGB, cv::COLOR_BGR2RGB);
-
-    std::vector<cv::Mat> channels(3);
-    cv::split(canvasRGB, channels);
-
-    for (int i = 0; i < 3; i++) {
-        CPLErr err = dst->GetRasterBand(i + 1)->RasterIO(
-            GF_Write,
-            0, 0,
-            canvas.cols, canvas.rows,
-            channels[i].data,
-            canvas.cols, canvas.rows,
-            GDT_Byte,
-            0, 0
-        );
-
-        if (err != CE_None) {
-            std::cerr << "[ERROR] Failed to write band " << i + 1 << "\n";
+        std::cout << "[STITCH] Created new mosaic with: " << ortho_path << "\n";
+    } else {
+        // Merge with existing using gdalwarp
+        std::string tmp_output = "stitched/tmp_mosaic.tif";
+        std::string cmd = "gdalwarp -overwrite -r cubic " + mosaic_path + " " + ortho_path + " " + tmp_output;
+        std::cout << "[GDAL] Merging with gdalwarp...\n";
+        int result = std::system(cmd.c_str());
+        if (result == 0) {
+            fs::rename(tmp_output, mosaic_path);
+            std::cout << "[STITCH] Updated mosaic.\n";
+        } else {
+            std::cerr << "[GDAL] Merge failed.\n";
         }
     }
 
-    GDALClose(dst);
-    std::cout << "[SAVE] Mosaic saved to " << output_path << "\n";
+    GDALClose(src);
+}
+
+void process_batch(int batch_id, std::vector<fs::path> images) {
+    fs::path batch_path = create_batch(images, batch_id);
+    run_odm_batch(batch_path);
+
+    fs::path ortho = batch_path / "odm_orthophoto" / "odm_orthophoto.tif";
+    if (fs::exists(ortho)) {
+        merge_orthophoto(ortho.string(), STITCHED);
+    } else {
+        std::cerr << "[WARN] Orthophoto missing for batch: " << batch_path << "\n";
+    }
+
+    batchFinished.notify_all(); 
+}
+
+void watch_folder() {
+    std::set<fs::path> processed;
+    int batch_id = 1;
+
+    while (!stopSignal) {
+        std::vector<fs::path> new_images;
+        for (const auto& f : fs::directory_iterator(INCOMING)) {
+            if ((f.path().extension() == ".jpg" || f.path().extension() == ".JPG") &&
+                processed.find(f.path()) == processed.end()) {
+                new_images.push_back(f.path());
+                processed.insert(f.path());
+            }
+            if (new_images.size() >= BATCH_SIZE)
+                break;
+        }
+
+        if (new_images.size() >= BATCH_SIZE) {
+            std::thread(process_batch, batch_id++, new_images).detach();
+        }
+
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+    }
 }
 
 int main() {
-    std::string watchFolder = "incoming";
-    std::string outputPath = "stitched/final_orthophoto.tif";
+    init_dirs();
 
-    std::set<std::string> processed;
+    std::thread watcher(watch_folder);
 
-    while (true) {
-        for (const auto& entry : fs::directory_iterator(watchFolder)) {
-            if (entry.path().extension() == ".jpg" || entry.path().extension() == ".JPG") {
-                std::string imagePath = entry.path().string();
-                if (processed.count(imagePath) == 0) {
-                    std::thread t(placeImage, imagePath);
-                    t.detach();
-                    processed.insert(imagePath);
-                }
-            }
-        }
-        std::this_thread::sleep_for(std::chrono::seconds(5));
-        save_geotiff(outputPath);
-    }
+    std::signal(SIGINT, [](int) {
+        stopSignal = true;
+    });
 
+    watcher.join();
     return 0;
 }
