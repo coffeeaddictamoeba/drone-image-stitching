@@ -4,6 +4,7 @@
 #include <thread>
 #include <mutex>
 #include <chrono>
+#include <set>
 #include <opencv4/opencv2/opencv.hpp>
 #include <gdal/gdal_priv.h>
 #include <gdal/ogr_spatialref.h>
@@ -18,34 +19,51 @@ int canvasWidth = 10000, canvasHeight = 10000;
 double originX = 0.0, originY = 0.0;
 bool canvasInitialized = false;
 
+// Global lat/lon reference for UTM zone calculation
+double referenceLat = 0.0, referenceLon = 0.0;
+
 bool exifToGPS(const std::string& path, double& lat, double& lon) {
     std::string cmd = "exiftool -n -GPSLatitude -GPSLongitude \"" + path + "\"";
     FILE* pipe = popen(cmd.c_str(), "r");
     if (!pipe) return false;
 
-    char buffer[128];
-    std::string output = "";
-    while (fgets(buffer, sizeof buffer, pipe) != NULL) {
-        output += buffer;
+    char buffer[256];
+    std::string line;
+    bool foundLat = false, foundLon = false;
+
+    while (fgets(buffer, sizeof(buffer), pipe)) {
+        line = buffer;
+
+        if (line.find("GPS Latitude") != std::string::npos) {
+            try {
+                lat = std::stod(line.substr(line.find(":") + 1));
+                foundLat = true;
+            } catch (...) {
+                pclose(pipe);
+                return false;
+            }
+        }
+
+        if (line.find("GPS Longitude") != std::string::npos) {
+            try {
+                lon = std::stod(line.substr(line.find(":") + 1));
+                foundLon = true;
+            } catch (...) {
+                pclose(pipe);
+                return false;
+            }
+        }
     }
+
     pclose(pipe);
-
-    size_t latIndex = output.find("GPS Latitude");
-    size_t lonIndex = output.find("GPS Longitude");
-
-    if (latIndex == std::string::npos || lonIndex == std::string::npos)
-        return false;
-
-    lat = std::stod(output.substr(latIndex + 14, output.find("\n", latIndex) - latIndex - 14));
-    lon = std::stod(output.substr(lonIndex + 15, output.find("\n", lonIndex) - lonIndex - 15));
-    return true;
+    return foundLat && foundLon;
 }
 
-// Convert lat/lon to projected coordinates using GDAL
 bool coordsToUTM(double lat, double lon, double& x, double& y) {
     OGRSpatialReference srcSRS, dstSRS;
     srcSRS.SetWellKnownGeogCS("WGS84");
-    dstSRS.SetUTM((int)((lon + 180) / 6) + 1, lat >= 0);
+    int utmZone = static_cast<int>((lon + 180) / 6) + 1;
+    dstSRS.SetUTM(utmZone, lat >= 0);
 
     OGRCoordinateTransformation* transform = OGRCreateCoordinateTransformation(&srcSRS, &dstSRS);
     if (!transform) return false;
@@ -58,7 +76,6 @@ bool coordsToUTM(double lat, double lon, double& x, double& y) {
     return true;
 }
 
-// Warp and blend image onto canvas
 void placeImage(const std::string& imagePath) {
     double lat, lon, x, y;
 
@@ -83,6 +100,8 @@ void placeImage(const std::string& imagePath) {
     if (!canvasInitialized) {
         originX = x - canvasWidth * pixelSize / 2;
         originY = y + canvasHeight * pixelSize / 2;
+        referenceLat = lat;
+        referenceLon = lon;
         canvas = cv::Mat::zeros(canvasHeight, canvasWidth, CV_8UC3);
         canvasInitialized = true;
     }
@@ -105,11 +124,11 @@ void placeImage(const std::string& imagePath) {
     std::cout << "[OK] Placed: " << imagePath << " at " << x << "," << y << "\n";
 }
 
-// Periodic save to GeoTIFF
 void save_geotiff(const std::string& output_path) {
     std::lock_guard<std::mutex> lock(canvasMutex);
-    GDALAllRegister();
+    if (!canvasInitialized) return;
 
+    GDALAllRegister();
     const char* format = "GTiff";
     GDALDriver* driver = GetGDALDriverManager()->GetDriverByName(format);
     if (!driver) return;
@@ -124,8 +143,9 @@ void save_geotiff(const std::string& output_path) {
     };
     dst->SetGeoTransform(geoTransform);
 
+    int utmZone = static_cast<int>((referenceLon + 180) / 6) + 1;
     OGRSpatialReference srs;
-    srs.SetUTM((int)((originX / 1000000.0) * 60.0) + 1, originY >= 0);
+    srs.SetUTM(utmZone, referenceLat >= 0);
     srs.SetWellKnownGeogCS("WGS84");
 
     char* wkt;
@@ -133,27 +153,31 @@ void save_geotiff(const std::string& output_path) {
     dst->SetProjection(wkt);
     CPLFree(wkt);
 
+    // Convert canvas from BGR to RGB
+    cv::Mat canvasRGB;
+    cv::cvtColor(canvas, canvasRGB, cv::COLOR_BGR2RGB);
+
     std::vector<cv::Mat> channels(3);
-cv::split(canvas, channels);
+    cv::split(canvasRGB, channels);
 
-for (int i = 0; i < 3; i++) {
-    CPLErr err = dst->GetRasterBand(i + 1)->RasterIO(
-        GF_Write,
-        0, 0,
-        canvas.cols, canvas.rows,
-        channels[i].data,
-        canvas.cols, canvas.rows,
-        GDT_Byte,
-        0, 0  // pixel/line spacing is default here
-    );
+    for (int i = 0; i < 3; i++) {
+        CPLErr err = dst->GetRasterBand(i + 1)->RasterIO(
+            GF_Write,
+            0, 0,
+            canvas.cols, canvas.rows,
+            channels[i].data,
+            canvas.cols, canvas.rows,
+            GDT_Byte,
+            0, 0
+        );
 
-    if (err != CE_None) {
-        std::cerr << "[ERROR] Failed to write band " << i + 1 << "\n";
+        if (err != CE_None) {
+            std::cerr << "[ERROR] Failed to write band " << i + 1 << "\n";
+        }
     }
-}
 
     GDALClose(dst);
-    std::cout << "[SAVE] Result saved to " << output_path << "\n";
+    std::cout << "[SAVE] Mosaic saved to " << output_path << "\n";
 }
 
 int main() {
@@ -164,7 +188,7 @@ int main() {
 
     while (true) {
         for (const auto& entry : fs::directory_iterator(watchFolder)) {
-            if (entry.path().extension() == ".jpg" || entry.path().extension() == ".JPG") { // add other formats later
+            if (entry.path().extension() == ".jpg" || entry.path().extension() == ".JPG") {
                 std::string imagePath = entry.path().string();
                 if (processed.count(imagePath) == 0) {
                     std::thread t(placeImage, imagePath);
@@ -176,5 +200,6 @@ int main() {
         std::this_thread::sleep_for(std::chrono::seconds(5));
         save_geotiff(outputPath);
     }
+
     return 0;
 }
