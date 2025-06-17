@@ -1,33 +1,18 @@
-#include "../include/homography.h"
-#include "../include/fmatch.h"
+#include "../include/mosaic.h"
 #include <opencv4/opencv2/opencv.hpp>
-#include <iostream>
-#include <ostream>
-#include <string>
 
 int main() {
-    std::string imagePath = "incoming/waypoint_20_20250521_105913.jpg";
+    std::string path1 = "incoming/waypoint_20_20250521_105913.jpg";
+    std::string path2 = "incoming/waypoint_21_20250521_105925.jpg";
 
-    cv::Mat input = cv::imread(imagePath);
-    if (input.empty()) {
-        std::cerr << "Image load failed\n";
-        return -1;
-    }
+    MosaicBuilder mosaic(path1, path2);
+    cv::Mat stitched;
 
-    HomographyEstimator estimator(imagePath);
-
-    cv::Mat warped = estimator.warpImage(input, cv::Size(5000, 5000));
-    cv::imwrite("warped_output.jpg", warped);
-
-    FeatureMatcher matcher;
-    cv::Mat img2 = cv::imread("incoming/waypoint_21_20250521_105925.jpg");
-    if (!img2.empty()) {
-        cv::Mat H;
-        std::vector<cv::DMatch> matches;
-        if (matcher.computeHomography(input, img2, H, matches)) {
-            std::cout << "Feature-based homography computed successfully.\n";
-        }
-        std::cout << H << std::endl;
+    if (mosaic.stitchImages(stitched)) {
+        std::cout << "Stitching successful.\n";
+        cv::imwrite("stitched_result.jpg", stitched);
+    } else {
+        std::cerr << "Stitching failed.\n";
     }
 
     return 0;

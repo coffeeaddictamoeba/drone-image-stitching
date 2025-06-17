@@ -41,5 +41,7 @@ bool FeatureMatcher::computeHomography(const cv::Mat& img1, const cv::Mat& img2,
     }
 
     H = cv::findHomography(pts2, pts1, cv::RANSAC);
+    std::cout << "Homography Matrix (Feature Matching):\n";
+    std::cout << H << '\n';
     return !H.empty();
 }
