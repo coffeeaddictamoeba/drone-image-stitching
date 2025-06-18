@@ -1,8 +1,8 @@
 #include "../include/homography.h"
 #include <cmath>
 
-HomographyEstimator::HomographyEstimator(const std::string& imagePath) {
-    MetadataExtractor extractor(imagePath);
+HomographyEstimator::HomographyEstimator(ExifToolPipe& tool, const std::string& imagePath) {
+    MetadataExtractor extractor(tool, imagePath);
     metadata = extractor.parseMetadata();
 }
 

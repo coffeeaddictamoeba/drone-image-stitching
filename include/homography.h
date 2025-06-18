@@ -4,7 +4,7 @@
 
 class HomographyEstimator {
 public:
-    explicit HomographyEstimator(const std::string& imagePath);
+    explicit HomographyEstimator(ExifToolPipe& tool, const std::string& imagePath);
 
     cv::Mat warpImage(const cv::Mat& inputImage, const cv::Size& outputSize);
 

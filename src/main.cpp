@@ -23,10 +23,15 @@ int main(int argc, char** argv) {
 
     if (mosaic.stitchImages(stitched)) {
         std::cout << "Stitching successful.\n";
-        cv::imwrite("incoming/stitched_result.jpg", stitched);
+        cv::imwrite("incoming/stitched_result3.jpg", stitched);
     } else {
         std::cerr << "Stitching failed.\n";
     }
 
     return 0;
 }
+
+// fix the stretching corner
+// add edge blending
+// add distortion fixes
+// add geotiff save format

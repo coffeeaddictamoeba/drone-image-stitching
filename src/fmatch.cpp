@@ -31,6 +31,8 @@ bool FeatureMatcher::computeHomography(const cv::Mat& img1, const cv::Mat& img2,
             goodMatches.push_back(pair[0]);
     }
 
+    std::cout << "Good matches found: " << goodMatches.size() << '\n';
+
     if (goodMatches.size() < 10)
         return false;
 

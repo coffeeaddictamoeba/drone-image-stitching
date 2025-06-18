@@ -1,29 +1,7 @@
 #include "../include/metadata.h"
-#include <cstdlib>
-#include <sstream>
-#include <fstream>
-#include <iostream>
 
-MetadataExtractor::MetadataExtractor(const std::string& path) : imagePath(path) {}
-
-void MetadataExtractor::runExifTool() {
-    std::string cmd = "exiftool -n \"" + imagePath + "\" > temp_meta.txt";
-    std::system(cmd.c_str());
-
-    std::ifstream infile("temp_meta.txt");
-    std::string line;
-    while (std::getline(infile, line)) {
-        auto colon = line.find(':');
-        if (colon != std::string::npos) {
-            std::string key = line.substr(0, colon);
-            std::string val = line.substr(colon + 1);
-            key.erase(key.find_last_not_of(" \t") + 1);
-            val.erase(0, val.find_first_not_of(" \t"));
-            exifData[key] = val;
-        }
-    }
-    std::remove("temp_meta.txt");
-}
+MetadataExtractor::MetadataExtractor(ExifToolPipe& tool, const std::string& path) 
+    : exifTool(tool), imagePath(path) {}
 
 double MetadataExtractor::getExifValueAsDouble(const std::string& key, double defaultValue) {
     try {
@@ -32,7 +10,7 @@ double MetadataExtractor::getExifValueAsDouble(const std::string& key, double de
         return defaultValue;
     }
 }
-
+    
 int MetadataExtractor::getExifValueAsInt(const std::string& key, int defaultValue) {
     try {
         return exifData.count(key) ? std::stoi(exifData[key]) : defaultValue;
@@ -42,7 +20,8 @@ int MetadataExtractor::getExifValueAsInt(const std::string& key, int defaultValu
 }
 
 CameraMetadata MetadataExtractor::parseMetadata() {
-    runExifTool();
+    exifTool.sendCommand(imagePath);
+    exifData = exifTool.getLastExifData();
 
     CameraMetadata meta;
     meta.focalLengthMM = getExifValueAsDouble("Focal Length", meta.focalLengthMM);
@@ -52,7 +31,7 @@ CameraMetadata MetadataExtractor::parseMetadata() {
     meta.imageHeight = getExifValueAsInt("Image Height", meta.imageHeight);
     meta.altitude = getExifValueAsDouble("GPS Altitude", meta.altitude);
     meta.yawDeg = getExifValueAsDouble("GPS Img Direction", meta.yawDeg);
-    meta.pitchDeg = getExifValueAsDouble("Pitch Angle", meta.pitchDeg);  // Optional custom tag
-    meta.rollDeg = getExifValueAsDouble("Roll Angle", meta.rollDeg);    // Optional custom tag
+    meta.pitchDeg = getExifValueAsDouble("Pitch Angle", meta.pitchDeg);
+    meta.rollDeg = getExifValueAsDouble("Roll Angle", meta.rollDeg);
     return meta;
 }
