@@ -1,7 +1,8 @@
 #include "../include/fmatch.h"
 #include <stdexcept>
 
-FeatureMatcher::FeatureMatcher(const std::string& detectorType) {
+FeatureMatcher::FeatureMatcher(ExifToolPipe& tool, const std::string& detectorType) 
+    : exiftool(tool) {
     if (detectorType == "SIFT")
         detector = cv::SIFT::create();
     else if (detectorType == "ORB")
@@ -16,12 +17,20 @@ void FeatureMatcher::detectAndDescribe(const cv::Mat& image, std::vector<cv::Key
     detector->detectAndCompute(image, cv::noArray(), keypoints, descriptors);
 }
 
-bool FeatureMatcher::computeHomography(const cv::Mat& img1, const cv::Mat& img2, cv::Mat& H, std::vector<cv::DMatch>& goodMatches) {
+bool FeatureMatcher::setWarped(const std::string& refPath, const std::string& targetPath) {
+    bool alreadyWarped = exiftool.hasExifTag(targetPath, "XMP:Warped");
+    if (!alreadyWarped) {
+        exiftool.setExifTag(targetPath, "-XMPWarped=True -XMPWarpedFrom=" + refPath);
+    }
+    return alreadyWarped;
+}
+
+bool FeatureMatcher::computeHomography(const ImageMatrix img1, const ImageMatrix img2, cv::Mat& H, std::vector<cv::DMatch>& goodMatches) {
     std::vector<cv::KeyPoint> kp1, kp2;
     cv::Mat desc1, desc2;
 
-    detectAndDescribe(img1, kp1, desc1);
-    detectAndDescribe(img2, kp2, desc2);
+    detectAndDescribe(img1.imageMatrix, kp1, desc1);
+    detectAndDescribe(img2.imageMatrix, kp2, desc2);
 
     std::vector<std::vector<cv::DMatch>> knnMatches;
     matcher->knnMatch(desc1, desc2, knnMatches, 2);
@@ -41,6 +50,9 @@ bool FeatureMatcher::computeHomography(const cv::Mat& img1, const cv::Mat& img2,
         pts1.push_back(kp1[match.queryIdx].pt);
         pts2.push_back(kp2[match.trainIdx].pt);
     }
+
+    // fix the corner stretching by metadata tag?
+    setWarped(img1.imagePath, img2.imagePath);
 
     H = cv::findHomography(pts2, pts1, cv::RANSAC);
     std::cout << "Homography Matrix (Feature Matching):\n";

@@ -14,11 +14,9 @@ int main(int argc, char** argv) {
     std::cout << "Source Image: " << path1 << '\n';
     std::string path2 = argv[2];
     std::cout << "Destination Image: " << path2 << '\n';
-    //std::string path2 = "incoming/waypoint_22_20250521_105937.jpg";
-    // std::string path1 = "incoming/waypoint_20_20250521_105913.jpg";
-    // std::string path2 = "incoming/waypoint_21_20250521_105925.jpg";
 
-    MosaicBuilder mosaic(path1, path2);
+    ExifToolPipe tool = ExifToolPipe();
+    MosaicBuilder mosaic(path1, path2, tool);
     cv::Mat stitched;
 
     if (mosaic.stitchImages(stitched)) {

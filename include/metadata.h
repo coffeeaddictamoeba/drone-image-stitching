@@ -10,6 +10,9 @@ public:
     ~ExifToolPipe();
 
     bool sendCommand(const std::string& imagePath);
+    bool setExifTag(const std::string& imagePath, const std::string& args);
+    bool hasExifTag(const std::string& imagePath, const std::string& tag);
+    std::string inExifTag(const std::string& imagePath, const std::string& tag);
     std::map<std::string, std::string> getLastExifData();
 
 private:

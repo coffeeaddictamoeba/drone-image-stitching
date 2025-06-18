@@ -1,4 +1,5 @@
 #include "../include/metadata.h"
+#include <iostream>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/types.h>
@@ -52,6 +53,56 @@ std::string ExifToolPipe::readResponse() {
             break;
     }
     return result;
+}
+
+bool ExifToolPipe::setExifTag(const std::string& imagePath, const std::string& args) {
+    if (imagePath.empty()) return false;
+
+    std::ostringstream cmd;
+    cmd << args << " \"" << imagePath << "\""
+        << "\n-n\n-execute\n";
+
+    std::string commandStr = cmd.str();
+    ssize_t bytesWritten = write(writeFd, commandStr.c_str(), commandStr.size());
+
+    if (bytesWritten < 0) {
+        std::cerr << "[ERROR] Failed to write to ExifTool pipe.\n";
+        return false;
+    }
+
+    return true;
+}
+
+bool ExifToolPipe::hasExifTag(const std::string& imagePath, const std::string& tag) {
+    if (imagePath.empty()) {
+        std::cerr << "[ERROR] hasExifTag: empty image path.\n";
+        return false;
+    }
+
+    sendCommand(imagePath);
+    auto imageData = getLastExifData();
+
+    auto it = imageData.find(tag);
+    if (it == imageData.end()) {
+        std::cerr << "[WARN] Tag '" << tag << "' not found in metadata of " << imagePath << ".\n";
+        return false;
+    }
+
+    return !it->second.empty();
+}
+
+std::string ExifToolPipe::inExifTag(const std::string& imagePath, const std::string& tag) {
+    sendCommand(imagePath);
+    auto imageData = getLastExifData();
+
+    auto it = imageData.find(tag);
+    if (it != imageData.end()) {
+        std::cout << tag << " of " << imagePath << ": " << it->second << '\n';
+        return it->second;
+    } else {
+        std::cerr << "[Warning] Tag \"" << tag << "\" not found in EXIF data of " << imagePath << '\n';
+        return "";
+    }
 }
 
 std::map<std::string, std::string> ExifToolPipe::getLastExifData() {
