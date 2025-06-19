@@ -1,5 +1,8 @@
 #pragma once
 
+#ifndef METADATA_H
+#define METADATA_H
+
 #include <string>
 #include <map>
 #include <unistd.h>
@@ -9,6 +12,12 @@ public:
     ExifToolPipe();
     ~ExifToolPipe();
 
+    ExifToolPipe(const ExifToolPipe&) = delete;
+    ExifToolPipe& operator=(const ExifToolPipe&) = delete;
+    
+    ExifToolPipe(ExifToolPipe&& other) noexcept;
+    ExifToolPipe& operator=(ExifToolPipe&& other) noexcept;
+
     bool sendCommand(const std::string& imagePath);
     bool setExifTag(const std::string& imagePath, const std::string& args);
     bool hasExifTag(const std::string& imagePath, const std::string& tag);
@@ -16,11 +25,13 @@ public:
     std::map<std::string, std::string> getLastExifData();
 
 private:
-    int writeFd = -1;
-    int readFd = -1;
-    pid_t childPid = -1;
+    pid_t childPid;
+    int writeFd;
+    int readFd;
 
     std::string readResponse();
+    void closeFd(int& fd);
+    void terminateChild();
 };
 
 struct CameraMetadata {
@@ -48,3 +59,5 @@ private:
     double getExifValueAsDouble(const std::string& key, double defaultValue);
     int getExifValueAsInt(const std::string& key, int defaultValue);
 };
+
+#endif
