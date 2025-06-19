@@ -23,6 +23,18 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "Mosaic stitching completed successfully.\n";
+
+        cv::Rect bounds;
+        cv::Mat mosaic = builder.mosaicFromTiles(outputDir, bounds);
+        if (mosaic.empty()) {
+            std::cerr << "Failed to reconstruct mosaic.\n";
+            return 1;
+        }
+
+        std::cout << "Mosaic bounds: " << bounds << "\n";
+        cv::imwrite("result.png", mosaic);
+        std::cout << "Saved reconstructed mosaic to: " << "result.png" << "\n";
+
     } catch (const std::exception& ex) {
         std::cerr << "Error: " << ex.what() << "\n";
         return 1;

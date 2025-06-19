@@ -43,6 +43,15 @@ public:
     bool loadImages();
     bool alignImages(const ImageMatrix& src, const ImageMatrix& dst, cv::Mat& H);
     bool stitchToTiles();
+    cv::Mat mosaicFromTiles(const std::string& tileDir, cv::Rect& mosaicBounds);
+    cv::Mat mosaicFromTiles(
+        const std::string& tileDir, 
+        cv::Rect& mosaicBounds, 
+        int startX, 
+        int startY, 
+        int endX,
+        int endY
+    );
 
 private:
     std::string refImagePath_;

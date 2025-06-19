@@ -159,3 +159,108 @@ bool MosaicBuilder::stitchToTiles() {
     tiles_.applyImage(targetImagePath_, homography_);
     return true;
 }
+
+// Mosaic from tiles: fixed size
+cv::Mat MosaicBuilder::mosaicFromTiles(
+            const std::string& tileDir, 
+            cv::Rect& mosaicBounds, 
+            int startX, 
+            int startY, 
+            int endX,
+            int endY
+    ) {
+    std::map<std::pair<int, int>, std::string> tileMap;
+    std::regex tileRegex(R"(tile_(\-?\d+)\_(\-?\d+)\.png)"); // searches for pattern "tile_y_x.png"
+
+    for (const auto& entry : fs::directory_iterator(tileDir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string filename = entry.path().filename().string();
+
+        std::smatch match;
+        if (std::regex_match(filename, match, tileRegex)) {
+            int ty = std::stoi(match[1]);
+            int tx = std::stoi(match[2]);
+            tileMap[{tx, ty}] = entry.path().string();
+
+            startX = std::min(startX, tx);
+            startY = std::min(startY, ty);
+            endX = std::max(endX, tx);
+            endY = std::max(endY, ty);
+        }
+    }
+
+    if (tileMap.empty()) {
+        std::cerr << "No tiles found in: " << tileDir << "\n";
+        return {};
+    }
+
+    int mosaicWidth = (endX - startX + 1) * TILE_SIZE;
+    int mosaicHeight = (endY - startY + 1) * TILE_SIZE;
+    mosaicBounds = cv::Rect(startX * TILE_SIZE, startY * TILE_SIZE, mosaicWidth, mosaicHeight);
+
+    cv::Mat mosaic(mosaicHeight, mosaicWidth, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+
+    for (const auto& [key, path] : tileMap) {
+        int tx = key.first, ty = key.second;
+        cv::Mat tile = cv::imread(path, cv::IMREAD_UNCHANGED);
+        if (tile.empty()) {
+            std::cerr << "Failed to read tile: " << path << "\n";
+            continue;
+        }
+        int x = (tx - startX) * TILE_SIZE;
+        int y = (ty - startY) * TILE_SIZE;
+
+        tile.copyTo(mosaic(cv::Rect(x, y, TILE_SIZE, TILE_SIZE)));
+    }
+    return mosaic;
+}
+
+// Mosaic from tiles: full size
+cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mosaicBounds) {
+    std::map<std::pair<int, int>, std::string> tileMap;
+    std::regex tileRegex(R"(tile_(\-?\d+)\_(\-?\d+)\.png)"); // searches for pattern "tile_y_x.png"
+
+    int minX = INT_MAX, minY = INT_MAX, maxX = INT_MIN, maxY = INT_MIN;
+
+    for (const auto& entry : fs::directory_iterator(tileDir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string filename = entry.path().filename().string();
+
+        std::smatch match;
+        if (std::regex_match(filename, match, tileRegex)) {
+            int ty = std::stoi(match[1]);
+            int tx = std::stoi(match[2]);
+            tileMap[{tx, ty}] = entry.path().string();
+
+            minX = std::min(minX, tx);
+            minY = std::min(minY, ty);
+            maxX = std::max(maxX, tx);
+            maxY = std::max(maxY, ty);
+        }
+    }
+
+    if (tileMap.empty()) {
+        std::cerr << "No tiles found in: " << tileDir << "\n";
+        return {};
+    }
+
+    int mosaicWidth = (maxX - minX + 1) * TILE_SIZE;
+    int mosaicHeight = (maxY - minY + 1) * TILE_SIZE;
+    mosaicBounds = cv::Rect(minX * TILE_SIZE, minY * TILE_SIZE, mosaicWidth, mosaicHeight);
+
+    cv::Mat mosaic(mosaicHeight, mosaicWidth, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+
+    for (const auto& [key, path] : tileMap) {
+        int tx = key.first, ty = key.second;
+        cv::Mat tile = cv::imread(path, cv::IMREAD_UNCHANGED);
+        if (tile.empty()) {
+            std::cerr << "Failed to read tile: " << path << "\n";
+            continue;
+        }
+        int x = (tx - minX) * TILE_SIZE;
+        int y = (ty - minY) * TILE_SIZE;
+
+        tile.copyTo(mosaic(cv::Rect(x, y, TILE_SIZE, TILE_SIZE)));
+    }
+    return mosaic;
+}
