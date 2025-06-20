@@ -2,11 +2,14 @@
 #include "../include/fmatch.h"
 #include <opencv4/opencv2/imgcodecs.hpp>
 #include <iostream>
+#include <string>
+
+namespace fs = std::filesystem;
 
 ///////////////////// MosaicTileManager /////////////////////
 
-MosaicTileManager::MosaicTileManager(const std::string& outputDir)
-    : outputDirectory_(outputDir)
+MosaicTileManager::MosaicTileManager(const std::string& outputDir, ExifToolPipe& tool)
+    : outputDirectory_(outputDir), exiftool_(tool)
 {
     std::filesystem::create_directories(outputDirectory_);
 }
@@ -15,8 +18,47 @@ TileKey MosaicTileManager::getTileKeyForPoint(int x, int y) const {
     return { x / TILE_SIZE, y / TILE_SIZE };
 }
 
+std::string MosaicTileManager::getOutputDirectory() const {
+    return outputDirectory_;
+}
+
 std::string MosaicTileManager::getTilePath(const TileKey& key) const {
     return outputDirectory_ + "/tile_" + std::to_string(key.y) + "_" + std::to_string(key.x) + ".png";
+}
+
+std::pair<double, double> MosaicTileManager::extractGPS(const std::string& imagePath) const {
+    auto parseCoordinate = [](const std::string& value) -> double {
+        std::string str = std::regex_replace(value, std::regex("^ +| +$|( ) +"), "$1");
+
+        try {
+            return std::stod(str);
+        } catch (...) {
+
+        }
+
+        std::smatch match;
+        std::regex dmsRegex(R"((\d+)[^\d]+(\d+)[^\d]+([\d.]+))"); // DMS format: 54 deg 54' 19.67"
+        if (std::regex_search(str, match, dmsRegex) && match.size() == 4) {
+            double degrees = std::stod(match[1]);
+            double minutes = std::stod(match[2]);
+            double seconds = std::stod(match[3]);
+            return degrees + minutes / 60.0 + seconds / 3600.0;
+        }
+
+        throw std::runtime_error("Failed to parse GPS coordinate: " + str);
+    };
+
+    std::string latStr = exiftool_.inExifTag(imagePath, "GPSLatitude");
+    std::string lonStr = exiftool_.inExifTag(imagePath, "GPSLongitude");
+
+    if (latStr.empty() || lonStr.empty()) {
+        throw std::runtime_error("Missing GPS metadata in image: " + imagePath);
+    }
+
+    double lat = parseCoordinate(latStr);
+    double lon = parseCoordinate(lonStr);
+
+    return { lat, lon };
 }
 
 cv::Mat MosaicTileManager::loadTile(const TileKey& key) const {
@@ -28,9 +70,18 @@ cv::Mat MosaicTileManager::loadTile(const TileKey& key) const {
     return cv::Mat(TILE_SIZE, TILE_SIZE, CV_8UC4, cv::Scalar(0, 0, 0, 0));
 }
 
-void MosaicTileManager::saveTile(const TileKey& key, const cv::Mat& tile) const {
+void MosaicTileManager::saveTile(const TileKey& key, const cv::Mat& tile, const double lat, const double lon) const {
     std::string path = getTilePath(key);
     cv::imwrite(path, tile);
+    
+    std::ostringstream tagStream;
+    tagStream << std::fixed << std::setprecision(10);
+    tagStream << "-GPSLatitude=" << std::abs(lat) << "\n";
+    tagStream << "-GPSLatitudeRef=" << (lat >= 0 ? "N" : "S") << "\n";
+    tagStream << "-GPSLongitude=" << std::abs(lon) << "\n";
+    tagStream << "-GPSLongitudeRef=" << (lon >= 0 ? "E" : "W") << "\n";
+
+    exiftool_.setExifTag(path, tagStream.str());
 }
 
 cv::Mat MosaicTileManager::warpTileRegion(const cv::Mat& input,
@@ -63,6 +114,8 @@ cv::Mat MosaicTileManager::warpTileRegion(const cv::Mat& input,
 void MosaicTileManager::applyImage(const std::string& imagePath,
                                    const cv::Mat& homography)
 {
+    auto [lat, lon] = extractGPS(imagePath);
+
     cv::Mat img = cv::imread(imagePath, cv::IMREAD_UNCHANGED);
     if (img.empty()) {
         std::cerr << "Failed to load image: " << imagePath << "\n";
@@ -107,7 +160,7 @@ void MosaicTileManager::applyImage(const std::string& imagePath,
                     }
                 }
             }
-            saveTile(key, tile);
+            saveTile(key, tile, lat, lon);
         }
     }
 }
@@ -170,14 +223,13 @@ cv::Mat MosaicBuilder::mosaicFromTiles(
             int endY
     ) {
     std::map<std::pair<int, int>, std::string> tileMap;
-    std::regex tileRegex(R"(tile_(\-?\d+)\_(\-?\d+)\.png)"); // searches for pattern "tile_y_x.png"
 
     for (const auto& entry : fs::directory_iterator(tileDir)) {
         if (!entry.is_regular_file()) continue;
         std::string filename = entry.path().filename().string();
 
         std::smatch match;
-        if (std::regex_match(filename, match, tileRegex)) {
+        if (std::regex_match(filename, match, TILE_REGEX)) {
             int ty = std::stoi(match[1]);
             int tx = std::stoi(match[2]);
             tileMap[{tx, ty}] = entry.path().string();
@@ -218,7 +270,6 @@ cv::Mat MosaicBuilder::mosaicFromTiles(
 // Mosaic from tiles: full size
 cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mosaicBounds) {
     std::map<std::pair<int, int>, std::string> tileMap;
-    std::regex tileRegex(R"(tile_(\-?\d+)\_(\-?\d+)\.png)"); // searches for pattern "tile_y_x.png"
 
     int minX = INT_MAX, minY = INT_MAX, maxX = INT_MIN, maxY = INT_MIN;
 
@@ -227,7 +278,7 @@ cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mos
         std::string filename = entry.path().filename().string();
 
         std::smatch match;
-        if (std::regex_match(filename, match, tileRegex)) {
+        if (std::regex_match(filename, match, TILE_REGEX)) {
             int ty = std::stoi(match[1]);
             int tx = std::stoi(match[2]);
             tileMap[{tx, ty}] = entry.path().string();
@@ -263,4 +314,30 @@ cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mos
         tile.copyTo(mosaic(cv::Rect(x, y, TILE_SIZE, TILE_SIZE)));
     }
     return mosaic;
+}
+
+std::optional<TileKey> MosaicBuilder::findClosestTile(const std::string& imagePath) {
+    auto [lat1, lon1] = tiles_.extractGPS(imagePath);
+
+    double bestDist = DBL_MAX;
+    std::optional<TileKey> bestKey;
+
+    for (const auto& entry : fs::directory_iterator(tiles_.getOutputDirectory())) {
+        std::string filename = entry.path().filename().string();
+        std::smatch match;
+        if (!std::regex_match(filename, match, TILE_REGEX)) continue;
+
+        int ty = std::stoi(match[1]);
+        int tx = std::stoi(match[2]);
+        std::string tilePath = entry.path().string();
+
+        auto [lat2, lon2] = tiles_.extractGPS(tilePath);
+
+        double dist = std::hypot(lat1 - lat2, lon1 - lon2);
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestKey = TileKey{tx, ty};
+        }
+    }
+    return bestKey;
 }

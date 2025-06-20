@@ -1,5 +1,7 @@
 #include "../include/metadata.h"
 #include <iostream>
+#include <regex>
+#include <string>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/types.h>
@@ -105,7 +107,13 @@ std::map<std::string, std::string> ExifToolPipe::getLastExifData() {
         if (pos != std::string::npos) {
             std::string key = line.substr(0, pos);
             std::string value = line.substr(pos + 1);
+
+            // trim spaces
+            key.erase(std::remove_if(key.begin(), key.end(), ::isspace), key.end());
+            value = std::regex_replace(value, std::regex("^ +| +$"), "");
+
             data[key] = value;
+            std::cout << "[DEBUG] ExifTool got: " << key << " : " << value << '\n';
         }
     }
     return data;
@@ -133,6 +141,7 @@ bool ExifToolPipe::hasExifTag(const std::string& imagePath, const std::string& t
 std::string ExifToolPipe::inExifTag(const std::string& imagePath, const std::string& tag) {
     std::ostringstream cmd;
     cmd << "-" << tag << "\n" << imagePath;
+    std::cout << "[DEBUG]: Running " << "-" << tag << "\n" << imagePath << '\n'; 
     if (!sendCommand(cmd.str())) return "";
 
     auto data = getLastExifData();

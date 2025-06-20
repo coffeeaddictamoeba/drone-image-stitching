@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+#include <regex>
 #include <string>
 #include <opencv4/opencv2/opencv.hpp>
 #include <filesystem>
@@ -7,6 +9,7 @@
 #include "fmatch.h"
 
 constexpr int TILE_SIZE = 512;
+const std::regex TILE_REGEX(R"(tile_(\-?\d+)\_(\-?\d+)\.png)"); // searches for pattern "tile_y_x.png"
 
 struct TileKey {
     int x, y;
@@ -17,12 +20,14 @@ struct TileKey {
 
 class MosaicTileManager {
 public:
-    MosaicTileManager(const std::string& outputDir);
+    MosaicTileManager(const std::string& outputDir, ExifToolPipe& tool);
 
     TileKey getTileKeyForPoint(int x, int y) const;
+    std::string getOutputDirectory() const;
     std::string getTilePath(const TileKey& key) const;
+    std::pair<double, double> extractGPS(const std::string& imagePath) const;
     cv::Mat loadTile(const TileKey& key) const;
-    void saveTile(const TileKey& key, const cv::Mat& tile) const;
+    void saveTile(const TileKey& key, const cv::Mat& tile, const double lat, const double lon) const;
 
     void applyImage(const std::string& imagePath, const cv::Mat& homography);
 
@@ -31,6 +36,7 @@ private:
     cv::Mat warpTileRegion(const cv::Mat& input, const cv::Mat& H, const cv::Rect& tileRect) const;
 
     std::string outputDirectory_;
+    ExifToolPipe& exiftool_;
 };
 
 class MosaicBuilder {
@@ -52,6 +58,8 @@ public:
         int endX,
         int endY
     );
+
+    std::optional<TileKey> findClosestTile(const std::string& imagePath); // make private
 
 private:
     std::string refImagePath_;

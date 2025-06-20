@@ -1,6 +1,7 @@
 #include "../include/mosaic.h"
 #include "../include/metadata.h"
 #include <iostream>
+#include <string>
 
 int main(int argc, char** argv) {
     if (argc < 4) {
@@ -14,7 +15,7 @@ int main(int argc, char** argv) {
 
     try {
         ExifToolPipe exiftool;
-        MosaicTileManager tileManager(outputDir);
+        MosaicTileManager tileManager(outputDir, exiftool);
         MosaicBuilder builder(refImage, targetImage, exiftool, tileManager);
 
         if (!builder.stitchToTiles()) {
@@ -35,6 +36,8 @@ int main(int argc, char** argv) {
         cv::imwrite("result.png", mosaic);
         std::cout << "Saved reconstructed mosaic to: " << "result.png" << "\n";
 
+        std::optional<TileKey> key = builder.findClosestTile("incoming/waypoint_22_20250521_105937.jpg");
+        std::cout << "x: " << key->x << ", y: " << key->y << '\n';
     } catch (const std::exception& ex) {
         std::cerr << "Error: " << ex.what() << "\n";
         return 1;
