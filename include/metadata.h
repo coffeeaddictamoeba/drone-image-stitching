@@ -23,6 +23,7 @@ public:
     bool hasExifTag(const std::string& imagePath, const std::string& tag);
     std::string inExifTag(const std::string& imagePath, const std::string& tag);
     std::map<std::string, std::string> getLastExifData();
+    double parseExifNumber(const std::string& value) const;
 
 private:
     pid_t childPid;

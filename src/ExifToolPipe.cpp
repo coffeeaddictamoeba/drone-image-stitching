@@ -119,6 +119,15 @@ std::map<std::string, std::string> ExifToolPipe::getLastExifData() {
     return data;
 }
 
+double ExifToolPipe::parseExifNumber(const std::string& value) const {
+    std::smatch match;
+    std::regex numberRegex(R"([-+]?\d*\.?\d+)");
+    if (std::regex_search(value, match, numberRegex)) {
+        return std::stod(match.str());
+    }
+    throw std::runtime_error("Failed to parse EXIF numeric value: " + value);
+}
+
 bool ExifToolPipe::setExifTag(const std::string& imagePath, const std::string& args) {
     std::ostringstream cmd;
     cmd << args << "\n" << imagePath << "\n" << "-overwrite_original_in_place";

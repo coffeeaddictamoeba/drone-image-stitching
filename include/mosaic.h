@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <optional>
 #include <regex>
 #include <string>
@@ -9,6 +10,11 @@
 #include "fmatch.h"
 
 constexpr int TILE_SIZE = 512;
+
+constexpr double M_PER_DEGREE_LATITUDE = 111320.0;
+constexpr double DEG_TO_RAD = M_PI / 180.0;
+constexpr double R = 6371000.0; // Earth radius in meters
+
 const std::regex TILE_REGEX(R"(tile_(\-?\d+)\_(\-?\d+)\.png)"); // searches for pattern "tile_y_x.png"
 
 struct TileKey {
@@ -30,6 +36,13 @@ public:
     void saveTile(const TileKey& key, const cv::Mat& tile, const double lat, const double lon) const;
 
     void applyImage(const std::string& imagePath, const cv::Mat& homography);
+    double estimateGSD(const std::string& imagePath) const;
+    std::pair<double, double> calculateTileGPS(
+        const TileKey& tileKey,
+        const TileKey& centerTile,
+        double centerLat,
+        double centerLon,
+        double gsd) const;
 
 private:
     void blendOntoTile(cv::Mat& tile, const cv::Mat& patch, const cv::Rect& roi);

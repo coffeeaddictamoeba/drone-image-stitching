@@ -1,5 +1,6 @@
 #include "../include/mosaic.h"
 #include "../include/fmatch.h"
+#include <cmath>
 #include <opencv4/opencv2/imgcodecs.hpp>
 #include <iostream>
 #include <string>
@@ -61,9 +62,52 @@ std::pair<double, double> MosaicTileManager::extractGPS(const std::string& image
     return { lat, lon };
 }
 
+double MosaicTileManager::estimateGSD(const std::string& imagePath) const {
+    // Constants for Pi Camera V2
+    const double sensorWidth = 3.674; // mm
+
+    std::string altitudeStr = exiftool_.inExifTag(imagePath, "GPSAltitude");
+    std::string focalStr = exiftool_.inExifTag(imagePath, "FocalLength");
+    std::string widthStr = exiftool_.inExifTag(imagePath, "ImageWidth");
+
+    if (altitudeStr.empty() || focalStr.empty() || widthStr.empty()) {
+        throw std::runtime_error("Missing required EXIF tags for GSD computation.");
+    }
+
+    double altitude = exiftool_.parseExifNumber(altitudeStr); // meters
+    double focalLength = exiftool_.parseExifNumber(focalStr); // mm
+    int imageWidth = std::stoi(widthStr);                       // px
+
+    if (focalLength <= 0 || imageWidth <= 0) {
+        throw std::runtime_error("Invalid focal length or image width for GSD computation.");
+    }
+    return (sensorWidth * altitude) / (focalLength * imageWidth); // m/px
+}
+
+std::pair<double, double> MosaicTileManager::calculateTileGPS(
+    const TileKey& tileKey,
+    const TileKey& centerTile,
+    double centerLat,
+    double centerLon,
+    double gsd) const
+{
+    int dx = tileKey.x - centerTile.x;
+    int dy = tileKey.y - centerTile.y;
+
+    double offsetX_m = dx * TILE_SIZE * gsd;
+    double offsetY_m = dy * TILE_SIZE * gsd;
+    
+    double metersPerDegLon = M_PER_DEGREE_LATITUDE * std::cos(centerLat * M_PI / 180.0);
+
+    double lat = centerLat - (offsetY_m / M_PER_DEGREE_LATITUDE);
+    double lon = centerLon + (offsetX_m / metersPerDegLon);
+
+    return {lat, lon};
+}
+
 cv::Mat MosaicTileManager::loadTile(const TileKey& key) const {
     std::string path = getTilePath(key);
-    if (std::filesystem::exists(path)) {
+    if (fs::exists(path)) {
         cv::Mat tile = cv::imread(path, cv::IMREAD_UNCHANGED);
         if (!tile.empty()) return tile;
     }
@@ -75,7 +119,7 @@ void MosaicTileManager::saveTile(const TileKey& key, const cv::Mat& tile, const 
     cv::imwrite(path, tile);
     
     std::ostringstream tagStream;
-    tagStream << std::fixed << std::setprecision(10);
+    tagStream << "-n\n";
     tagStream << "-GPSLatitude=" << std::abs(lat) << "\n";
     tagStream << "-GPSLatitudeRef=" << (lat >= 0 ? "N" : "S") << "\n";
     tagStream << "-GPSLongitude=" << std::abs(lon) << "\n";
@@ -144,6 +188,9 @@ void MosaicTileManager::applyImage(const std::string& imagePath,
     int tx0 = std::floor(minX / TILE_SIZE), ty0 = std::floor(minY / TILE_SIZE);
     int tx1 = std::floor(maxX / TILE_SIZE), ty1 = std::floor(maxY / TILE_SIZE);
 
+    TileKey centerKey{ (tx0 + tx1) / 2, (ty0 + ty1) / 2 };
+    double gsd = estimateGSD(imagePath);
+
     for (int ty = ty0; ty <= ty1; ++ty) {
         for (int tx = tx0; tx <= tx1; ++tx) {
             TileKey key{tx, ty};
@@ -160,7 +207,9 @@ void MosaicTileManager::applyImage(const std::string& imagePath,
                     }
                 }
             }
-            saveTile(key, tile, lat, lon);
+            auto [tileLat, tileLon] = calculateTileGPS(key, centerKey, lat, lon, gsd);
+
+            saveTile(key, tile, tileLat, tileLon);
         }
     }
 }
@@ -333,7 +382,15 @@ std::optional<TileKey> MosaicBuilder::findClosestTile(const std::string& imagePa
 
         auto [lat2, lon2] = tiles_.extractGPS(tilePath);
 
-        double dist = std::hypot(lat1 - lat2, lon1 - lon2);
+        double dLat = (lat2 - lat1) * DEG_TO_RAD;
+        double dLon = (lon2 - lon1) * DEG_TO_RAD;
+
+        double a = std::sin(dLat/2) * std::sin(dLat/2) +
+                std::cos(lat1 * DEG_TO_RAD) * std::cos(lat2 * DEG_TO_RAD) *
+                std::sin(dLon/2) * std::sin(dLon/2);
+        double c = 2 * std::atan2(std::sqrt(a), std::sqrt(1-a));
+        double dist = R * c;
+
         if (dist < bestDist) {
             bestDist = dist;
             bestKey = TileKey{tx, ty};
