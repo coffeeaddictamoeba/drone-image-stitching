@@ -85,7 +85,7 @@ std::string ExifToolPipe::readResponse() {
             break;
         }
     }
-    std::cout << "ExifTool read the data successfully\n";
+    //std::cout << "ExifTool read the data successfully\n";
 
     return result;
 }

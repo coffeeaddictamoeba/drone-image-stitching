@@ -3,11 +3,10 @@
 #include <cmath>
 #include <opencv4/opencv2/imgcodecs.hpp>
 #include <iostream>
+#include <optional>
 #include <string>
 
 namespace fs = std::filesystem;
-
-///////////////////// MosaicTileManager /////////////////////
 
 MosaicTileManager::MosaicTileManager(const std::string& outputDir, ExifToolPipe& tool)
     : outputDirectory_(outputDir), exiftool_(tool)
@@ -27,6 +26,7 @@ std::string MosaicTileManager::getTilePath(const TileKey& key) const {
     return outputDirectory_ + "/tile_" + std::to_string(key.y) + "_" + std::to_string(key.x) + ".png";
 }
 
+// TODO: make more flexible
 std::pair<double, double> MosaicTileManager::extractGPS(const std::string& imagePath) const {
     auto parseCoordinate = [](const std::string& value) -> double {
         std::string str = std::regex_replace(value, std::regex("^ +| +$|( ) +"), "$1");
@@ -62,6 +62,7 @@ std::pair<double, double> MosaicTileManager::extractGPS(const std::string& image
     return { lat, lon };
 }
 
+// Make tags as constants?
 double MosaicTileManager::estimateGSD(const std::string& imagePath) const {
     // Constants for Pi Camera V2
     const double sensorWidth = 3.674; // mm
@@ -212,189 +213,4 @@ void MosaicTileManager::applyImage(const std::string& imagePath,
             saveTile(key, tile, tileLat, tileLon);
         }
     }
-}
-
-///////////////////// MosaicBuilder /////////////////////
-
-MosaicBuilder::MosaicBuilder(const std::string& refImagePath,
-                             const std::string& targetImagePath,
-                             ExifToolPipe& tool,
-                             MosaicTileManager& tileManager)
-    : refImagePath_(refImagePath),
-      targetImagePath_(targetImagePath),
-      exiftool_(tool),
-      tiles_(tileManager)
-{
-}
-
-bool MosaicBuilder::loadImages() {
-    ref_ = ImageMatrix{cv::imread(refImagePath_, cv::IMREAD_UNCHANGED), refImagePath_};
-    target_ = ImageMatrix{cv::imread(targetImagePath_, cv::IMREAD_UNCHANGED), targetImagePath_};
-    return !ref_.imageMatrix.empty() && !target_.imageMatrix.empty();
-}
-
-bool MosaicBuilder::alignImages(const ImageMatrix& src,
-                                const ImageMatrix& dst,
-                                cv::Mat& H)
-{
-    FeatureMatcher matcher(exiftool_, "SIFT");
-    std::vector<cv::DMatch> matches;
-    if (!matcher.computeHomography(src, dst, H, matches)) {
-        std::cerr << "Feature matching failed.\n";
-        return false;
-    }
-    return true;
-}
-
-bool MosaicBuilder::stitchToTiles() {
-    if (!loadImages()) {
-        std::cerr << "Failed to load input images.\n";
-        return false;
-    }
-
-    tiles_.applyImage(refImagePath_, cv::Mat::eye(3, 3, CV_64F));
-
-    if (!alignImages(ref_, target_, homography_)) {
-        return false;
-    }
-
-    tiles_.applyImage(targetImagePath_, homography_);
-    return true;
-}
-
-// Mosaic from tiles: fixed size
-cv::Mat MosaicBuilder::mosaicFromTiles(
-            const std::string& tileDir, 
-            cv::Rect& mosaicBounds, 
-            int startX, 
-            int startY, 
-            int endX,
-            int endY
-    ) {
-    std::map<std::pair<int, int>, std::string> tileMap;
-
-    for (const auto& entry : fs::directory_iterator(tileDir)) {
-        if (!entry.is_regular_file()) continue;
-        std::string filename = entry.path().filename().string();
-
-        std::smatch match;
-        if (std::regex_match(filename, match, TILE_REGEX)) {
-            int ty = std::stoi(match[1]);
-            int tx = std::stoi(match[2]);
-            tileMap[{tx, ty}] = entry.path().string();
-
-            startX = std::min(startX, tx);
-            startY = std::min(startY, ty);
-            endX = std::max(endX, tx);
-            endY = std::max(endY, ty);
-        }
-    }
-
-    if (tileMap.empty()) {
-        std::cerr << "No tiles found in: " << tileDir << "\n";
-        return {};
-    }
-
-    int mosaicWidth = (endX - startX + 1) * TILE_SIZE;
-    int mosaicHeight = (endY - startY + 1) * TILE_SIZE;
-    mosaicBounds = cv::Rect(startX * TILE_SIZE, startY * TILE_SIZE, mosaicWidth, mosaicHeight);
-
-    cv::Mat mosaic(mosaicHeight, mosaicWidth, CV_8UC4, cv::Scalar(0, 0, 0, 0));
-
-    for (const auto& [key, path] : tileMap) {
-        int tx = key.first, ty = key.second;
-        cv::Mat tile = cv::imread(path, cv::IMREAD_UNCHANGED);
-        if (tile.empty()) {
-            std::cerr << "Failed to read tile: " << path << "\n";
-            continue;
-        }
-        int x = (tx - startX) * TILE_SIZE;
-        int y = (ty - startY) * TILE_SIZE;
-
-        tile.copyTo(mosaic(cv::Rect(x, y, TILE_SIZE, TILE_SIZE)));
-    }
-    return mosaic;
-}
-
-// Mosaic from tiles: full size
-cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mosaicBounds) {
-    std::map<std::pair<int, int>, std::string> tileMap;
-
-    int minX = INT_MAX, minY = INT_MAX, maxX = INT_MIN, maxY = INT_MIN;
-
-    for (const auto& entry : fs::directory_iterator(tileDir)) {
-        if (!entry.is_regular_file()) continue;
-        std::string filename = entry.path().filename().string();
-
-        std::smatch match;
-        if (std::regex_match(filename, match, TILE_REGEX)) {
-            int ty = std::stoi(match[1]);
-            int tx = std::stoi(match[2]);
-            tileMap[{tx, ty}] = entry.path().string();
-
-            minX = std::min(minX, tx);
-            minY = std::min(minY, ty);
-            maxX = std::max(maxX, tx);
-            maxY = std::max(maxY, ty);
-        }
-    }
-
-    if (tileMap.empty()) {
-        std::cerr << "No tiles found in: " << tileDir << "\n";
-        return {};
-    }
-
-    int mosaicWidth = (maxX - minX + 1) * TILE_SIZE;
-    int mosaicHeight = (maxY - minY + 1) * TILE_SIZE;
-    mosaicBounds = cv::Rect(minX * TILE_SIZE, minY * TILE_SIZE, mosaicWidth, mosaicHeight);
-
-    cv::Mat mosaic(mosaicHeight, mosaicWidth, CV_8UC4, cv::Scalar(0, 0, 0, 0));
-
-    for (const auto& [key, path] : tileMap) {
-        int tx = key.first, ty = key.second;
-        cv::Mat tile = cv::imread(path, cv::IMREAD_UNCHANGED);
-        if (tile.empty()) {
-            std::cerr << "Failed to read tile: " << path << "\n";
-            continue;
-        }
-        int x = (tx - minX) * TILE_SIZE;
-        int y = (ty - minY) * TILE_SIZE;
-
-        tile.copyTo(mosaic(cv::Rect(x, y, TILE_SIZE, TILE_SIZE)));
-    }
-    return mosaic;
-}
-
-std::optional<TileKey> MosaicBuilder::findClosestTile(const std::string& imagePath) {
-    auto [lat1, lon1] = tiles_.extractGPS(imagePath);
-
-    double bestDist = DBL_MAX;
-    std::optional<TileKey> bestKey;
-
-    for (const auto& entry : fs::directory_iterator(tiles_.getOutputDirectory())) {
-        std::string filename = entry.path().filename().string();
-        std::smatch match;
-        if (!std::regex_match(filename, match, TILE_REGEX)) continue;
-
-        int ty = std::stoi(match[1]);
-        int tx = std::stoi(match[2]);
-        std::string tilePath = entry.path().string();
-
-        auto [lat2, lon2] = tiles_.extractGPS(tilePath);
-
-        double dLat = (lat2 - lat1) * DEG_TO_RAD;
-        double dLon = (lon2 - lon1) * DEG_TO_RAD;
-
-        double a = std::sin(dLat/2) * std::sin(dLat/2) +
-                std::cos(lat1 * DEG_TO_RAD) * std::cos(lat2 * DEG_TO_RAD) *
-                std::sin(dLon/2) * std::sin(dLon/2);
-        double c = 2 * std::atan2(std::sqrt(a), std::sqrt(1-a));
-        double dist = R * c;
-
-        if (dist < bestDist) {
-            bestDist = dist;
-            bestKey = TileKey{tx, ty};
-        }
-    }
-    return bestKey;
 }

@@ -25,6 +25,12 @@ int main(int argc, char** argv) {
 
         std::cout << "Mosaic stitching completed successfully.\n";
 
+        
+
+        if (!builder.addImageToMosaic("incoming/waypoint_22_20250521_105937.jpg")) {
+            std::cout << "Image was not aligned.";
+        }
+
         cv::Rect bounds;
         cv::Mat mosaic = builder.mosaicFromTiles(outputDir, bounds);
         if (mosaic.empty()) {
@@ -35,9 +41,7 @@ int main(int argc, char** argv) {
         std::cout << "Mosaic bounds: " << bounds << "\n";
         cv::imwrite("result.png", mosaic);
         std::cout << "Saved reconstructed mosaic to: " << "result.png" << "\n";
-
-        std::optional<TileKey> key = builder.findClosestTile("incoming/waypoint_22_20250521_105937.jpg");
-        std::cout << "x: " << key->x << ", y: " << key->y << '\n';
+        
     } catch (const std::exception& ex) {
         std::cerr << "Error: " << ex.what() << "\n";
         return 1;
