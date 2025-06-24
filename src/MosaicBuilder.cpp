@@ -261,25 +261,59 @@ std::optional<TileKey> MosaicBuilder::findClosestTile(const std::string& imagePa
     return bestKey;
 }
 
-bool MosaicBuilder::addImageToMosaic(const std::string& newImagePath) {
-        ImageMatrix newImage = toImageMatrix(newImagePath);
+// Get mosaic around central tile 3x3 size
+cv::Mat MosaicBuilder::getMosaicAroundTile(TileKey center, int radius, cv::Rect& outBounds) {
+    int minX = center.x - radius;
+    int maxX = center.x + radius;
+    int minY = center.y - radius;
+    int maxY = center.y + radius;
 
-        auto bestTileKeyOpt = findClosestTile(newImagePath);
-        if (!bestTileKeyOpt.has_value()) {
-            std::cerr << "Failed to find a closest tile for image alignment.\n";
-            return false;
+    int width = (maxX - minX + 1) * TILE_SIZE;
+    int height = (maxY - minY + 1) * TILE_SIZE;
+
+    outBounds = cv::Rect(minX * TILE_SIZE, minY * TILE_SIZE, width, height);
+    cv::Mat mosaic(height, width, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+
+    for (int tx = minX; tx <= maxX; ++tx) {
+        for (int ty = minY; ty <= maxY; ++ty) {
+            TileKey key{tx, ty};
+            std::string path = tiles_.getTilePath(key);
+            if (!fs::exists(path) || !isValidTile(path)) continue;
+
+            cv::Mat tile = cv::imread(path, cv::IMREAD_UNCHANGED);
+            if (tile.empty()) continue;
+
+            int x = (tx - minX) * TILE_SIZE;
+            int y = (ty - minY) * TILE_SIZE;
+            tile.copyTo(mosaic(cv::Rect(x, y, TILE_SIZE, TILE_SIZE)));
         }
+    }
+    return mosaic;
+}
+
+bool MosaicBuilder::addImageToMosaic(const std::string& newImagePath) {
+    auto bestTileKeyOpt = findClosestTile(newImagePath);
+    if (!bestTileKeyOpt) return false;
     
-        TileKey key = *bestTileKeyOpt;
-        std::string tilePath = tiles_.getTilePath(key);
-        ImageMatrix bestTile = toImageMatrix(tilePath);
+    TileKey bestKey = *bestTileKeyOpt;
+    TileKey localOriginKey{ bestKey.x - 1, bestKey.y - 1 };
     
-        cv::Mat H;
-        if (!alignImages(newImage, bestTile, H)){
-            std::cerr << "Homography estimation failed for alignment to closest tile.\n";
-            return false;
-        }
+    cv::Rect localBounds;
+    cv::Mat localMosaic = getMosaicAroundTile(bestKey, 1, localBounds);
+    if (localMosaic.empty()) {
+        std::cerr << "Failed to build local mosaic.\n";
+        return false;
+    }
     
-        tiles_.applyImage(newImagePath, H.inv());
-        return true;
-    }    
+    ImageMatrix mosaicMatrix{localMosaic, "local mosaic"};
+    ImageMatrix newImageMatrix = toImageMatrix(newImagePath);
+    
+    cv::Mat H;
+    if (!alignImages(newImageMatrix, mosaicMatrix, H)) return false;
+
+    H = H.inv();
+    cv::Mat withOffset = tiles_.computeGlobalHomography(localOriginKey, H);
+    
+    tiles_.applyImage(newImagePath, withOffset);
+    return true;    
+}

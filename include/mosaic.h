@@ -35,6 +35,10 @@ class MosaicTileManager {
         std::string getOutputDirectory() const;
         std::string getTilePath(const TileKey& key) const;
         TileKey getTileKeyForPoint(int x, int y) const;
+        cv::Mat computeTileHomography(const TileKey& tileKey, const cv::Mat& homography);
+        cv::Mat computeGlobalHomography(
+            const TileKey& localOriginKey,
+            const cv::Mat& localHomography);
 
         std::pair<double, double> extractGPS(const std::string& imagePath) const;
         double estimateGSD(const std::string& imagePath) const;
@@ -45,8 +49,10 @@ class MosaicTileManager {
             double centerLon,
             double gsd) const;
 
+        void assignMetadata(const std::string imagePath, const double lat, const double lon, const double alt, const double flen) const;
+
         cv::Mat loadTile(const TileKey& key) const;
-        void saveTile(const TileKey& key, const cv::Mat& tile, const double lat, const double lon) const;
+        void saveTile(const TileKey& key, const cv::Mat& tile, const double lat, const double lon, const std::string imagePath) const;
 
         void applyImage(const std::string& imagePath, const cv::Mat& homography);
 
@@ -95,4 +101,5 @@ class MosaicBuilder {
 
         double findTileDistance(std::string tilePath, double latToCompare, double lonToCompare);
         std::optional<TileKey> findClosestTile(const std::string& imagePath);
+        cv::Mat getMosaicAroundTile(TileKey center, int radius, cv::Rect& outBounds);
 };

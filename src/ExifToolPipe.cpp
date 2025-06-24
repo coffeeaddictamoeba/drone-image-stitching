@@ -113,7 +113,7 @@ std::map<std::string, std::string> ExifToolPipe::getLastExifData() {
             value = std::regex_replace(value, std::regex("^ +| +$"), "");
 
             data[key] = value;
-            std::cout << "[DEBUG] ExifTool got: " << key << " : " << value << '\n';
+            //std::cout << "[DEBUG] ExifTool got: " << key << " : " << value << '\n';
         }
     }
     return data;
@@ -150,7 +150,7 @@ bool ExifToolPipe::hasExifTag(const std::string& imagePath, const std::string& t
 std::string ExifToolPipe::inExifTag(const std::string& imagePath, const std::string& tag) {
     std::ostringstream cmd;
     cmd << "-" << tag << "\n" << imagePath;
-    std::cout << "[DEBUG]: Running " << "-" << tag << "\n" << imagePath << '\n'; 
+    //std::cout << "[DEBUG]: Running " << "-" << tag << "\n" << imagePath << '\n'; 
     if (!sendCommand(cmd.str())) return "";
 
     auto data = getLastExifData();

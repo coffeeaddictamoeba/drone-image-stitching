@@ -6,6 +6,7 @@ LIBS := $(shell $(PKGCONFIG) --cflags --libs opencv4 gdal)
 SRC_DIR := src
 OBJ_DIR := obj
 BIN := mosaic
+TILES_DIR := tiles
 
 SRCS := $(wildcard $(SRC_DIR)/*.cpp)
 OBJS := $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(SRCS))
@@ -22,6 +23,6 @@ $(OBJ_DIR):
 	mkdir -p $(OBJ_DIR)
 
 clean:
-	rm -rf $(OBJ_DIR) $(BIN)
+	rm -rf $(OBJ_DIR) $(BIN) $(TILES_DIR)
 
 .PHONY: all clean

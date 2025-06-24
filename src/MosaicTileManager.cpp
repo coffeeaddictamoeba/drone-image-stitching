@@ -115,18 +115,24 @@ cv::Mat MosaicTileManager::loadTile(const TileKey& key) const {
     return cv::Mat(TILE_SIZE, TILE_SIZE, CV_8UC4, cv::Scalar(0, 0, 0, 0));
 }
 
-void MosaicTileManager::saveTile(const TileKey& key, const cv::Mat& tile, const double lat, const double lon) const {
+void MosaicTileManager::assignMetadata(const std::string imagePath, const double lat, const double lon, const double alt, const double flen) const {
+    std::ostringstream tagStream;
+    tagStream << "-n\n";
+    tagStream << "-GPSLatitude=" << lat << "\n";
+    tagStream << "-GPSLongitude=" << lon << "\n";
+    tagStream << "-GPSAltitude=" << alt << "\n";
+    tagStream << "-FocalLength=" << flen << "\n";
+
+    exiftool_.setExifTag(imagePath, tagStream.str());
+}
+
+void MosaicTileManager::saveTile(const TileKey& key, const cv::Mat& tile, const double lat, const double lon, const std::string imagePath) const {
     std::string path = getTilePath(key);
     cv::imwrite(path, tile);
     
-    std::ostringstream tagStream;
-    tagStream << "-n\n";
-    tagStream << "-GPSLatitude=" << std::abs(lat) << "\n";
-    tagStream << "-GPSLatitudeRef=" << (lat >= 0 ? "N" : "S") << "\n";
-    tagStream << "-GPSLongitude=" << std::abs(lon) << "\n";
-    tagStream << "-GPSLongitudeRef=" << (lon >= 0 ? "E" : "W") << "\n";
-
-    exiftool_.setExifTag(path, tagStream.str());
+    double alt = exiftool_.parseExifNumber(exiftool_.inExifTag(imagePath, "GPSAltitude"));
+    double flen = exiftool_.parseExifNumber(exiftool_.inExifTag(imagePath, "FocalLength"));
+    assignMetadata(path, lat, lon, alt, flen);
 }
 
 cv::Mat MosaicTileManager::warpTileRegion(const cv::Mat& input,
@@ -154,6 +160,35 @@ cv::Mat MosaicTileManager::warpTileRegion(const cv::Mat& input,
                         cv::Size(tileRect.width, tileRect.height),
                         cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
     return tile;
+}
+
+cv::Mat MosaicTileManager::computeTileHomography(const TileKey& tileKey, const cv::Mat& homography) {
+    double offsetX = tileKey.x * TILE_SIZE;
+    double offsetY = tileKey.y * TILE_SIZE;
+
+    cv::Mat T_offset = (cv::Mat_<double>(3, 3) <<
+        1, 0, offsetX,
+        0, 1, offsetY,
+        0, 0, 1);
+
+    cv::Mat adjustedHomography = homography * T_offset;
+
+    return adjustedHomography;
+}
+
+cv::Mat MosaicTileManager::computeGlobalHomography(
+    const TileKey& localOriginKey,
+    const cv::Mat& localHomography)
+{
+    double offsetX = localOriginKey.x * TILE_SIZE;
+    double offsetY = localOriginKey.y * TILE_SIZE;
+
+    cv::Mat offsetMat = (cv::Mat_<double>(3, 3) <<
+        1, 0, offsetX,
+        0, 1, offsetY,
+        0, 0, 1);
+
+    return offsetMat * localHomography;
 }
 
 void MosaicTileManager::applyImage(const std::string& imagePath,
@@ -210,7 +245,7 @@ void MosaicTileManager::applyImage(const std::string& imagePath,
             }
             auto [tileLat, tileLon] = calculateTileGPS(key, centerKey, lat, lon, gsd);
 
-            saveTile(key, tile, tileLat, tileLon);
+            saveTile(key, tile, tileLat, tileLon, imagePath);
         }
     }
 }
