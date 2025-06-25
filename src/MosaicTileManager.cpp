@@ -139,6 +139,7 @@ cv::Mat MosaicTileManager::warpTileRegion(const cv::Mat& input,
                                           const cv::Mat& H,
                                           const cv::Rect& tileRect) const
 {
+    // it omits images with anything transparent + does not increase size. FIX
     std::vector<cv::Point2f> tileCorners = {
         cv::Point2f(tileRect.x, tileRect.y),
         cv::Point2f(tileRect.x + TILE_SIZE, tileRect.y),
@@ -327,22 +328,31 @@ void MosaicTileManager::applyImagePerTile(const std::string& imagePath,
             cv::Rect tileRect(tx * TILE_SIZE, ty * TILE_SIZE, TILE_SIZE, TILE_SIZE);
             cv::Mat tile = loadTile(key);
             cv::Mat patch = warpTileRegion(img, homography, tileRect);
+
             if (patch.empty()) continue;
+
+            bool tileModified = false;
 
             for (int y = 0; y < TILE_SIZE; ++y) {
                 for (int x = 0; x < TILE_SIZE; ++x) {
-                    cv::Vec4b p = patch.at<cv::Vec4b>(y, x);
-                    if (p[3]) {
-                        tile.at<cv::Vec4b>(y, x) = p;
+                    const cv::Vec4b& srcPixel = patch.at<cv::Vec4b>(y, x);
+                    cv::Vec4b& dstPixel = tile.at<cv::Vec4b>(y, x);
+
+                    if (srcPixel != dstPixel) {
+                        dstPixel = srcPixel;
+                        tileModified = true;
                     }
                 }
             }
 
-            auto [tileLat, tileLon] = calculateTileGPS(key, centerKey, lat, lon, gsd);
-            saveTile(key, tile, tileLat, tileLon, imagePath);
+            if (tileModified) {
+                auto [tileLat, tileLon] = calculateTileGPS(key, centerKey, lat, lon, gsd);
+                saveTile(key, tile, tileLat, tileLon, imagePath);
+            }
         }
     }
 }
+
 
 void MosaicTileManager::applyImage(const std::string& imagePath,
                                    const cv::Mat& homography,
