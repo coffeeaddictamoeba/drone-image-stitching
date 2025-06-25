@@ -54,11 +54,13 @@ class MosaicTileManager {
         cv::Mat loadTile(const TileKey& key) const;
         void saveTile(const TileKey& key, const cv::Mat& tile, const double lat, const double lon, const std::string imagePath) const;
 
-        void applyImage(const std::string& imagePath, const cv::Mat& homography);
+        void applyImage(const std::string& imagePath, const cv::Mat& homography, bool warpOnce);
 
     private:
         void blendOntoTile(cv::Mat& tile, const cv::Mat& patch, const cv::Rect& roi);
         cv::Mat warpTileRegion(const cv::Mat& input, const cv::Mat& H, const cv::Rect& tileRect) const;
+        void applyImagePerTile(const std::string& imagePath, const cv::Mat& homography);
+        void applyImageWarpOnce(const std::string& imagePath, const cv::Mat& homography);
 
         std::string outputDirectory_;
         ExifToolPipe& exiftool_;

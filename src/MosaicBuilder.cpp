@@ -57,11 +57,11 @@ bool MosaicBuilder::stitchToTiles() {
         return false;
     }
 
-    tiles_.applyImage(refImagePath_, cv::Mat::eye(3, 3, CV_64F));    
+    tiles_.applyImage(refImagePath_, cv::Mat::eye(3, 3, CV_64F), false);    
 
     if (!alignImages(ref_, target_, homography_)) { return false; }
 
-    tiles_.applyImage(targetImagePath_, homography_);
+    tiles_.applyImage(targetImagePath_, homography_, false);
     return true;
 }
 
@@ -71,11 +71,11 @@ bool MosaicBuilder::stitchToTiles(std::string refImagePath, std::string targetIm
         return false;
     }
 
-    tiles_.applyImage(refImagePath, cv::Mat::eye(3, 3, CV_64F));    
+    tiles_.applyImage(refImagePath, cv::Mat::eye(3, 3, CV_64F), false);    
 
     if (!alignImages(ref_, target_, homography_)) { return false; }
 
-    tiles_.applyImage(targetImagePath, homography_);
+    tiles_.applyImage(targetImagePath, homography_, false);
     return true;
 }
 
@@ -314,6 +314,6 @@ bool MosaicBuilder::addImageToMosaic(const std::string& newImagePath) {
     H = H.inv();
     cv::Mat withOffset = tiles_.computeGlobalHomography(localOriginKey, H);
     
-    tiles_.applyImage(newImagePath, withOffset);
+    tiles_.applyImage(newImagePath, withOffset, true);
     return true;    
 }

@@ -139,27 +139,39 @@ cv::Mat MosaicTileManager::warpTileRegion(const cv::Mat& input,
                                           const cv::Mat& H,
                                           const cv::Rect& tileRect) const
 {
-    cv::Mat Hinv = H.inv();
-    std::vector<cv::Point2f> dstPts = {
-        {(float)tileRect.x, (float)tileRect.y},
-        {(float)(tileRect.x + tileRect.width), (float)tileRect.y},
-        {(float)(tileRect.x + tileRect.width), (float)(tileRect.y + tileRect.height)},
-        {(float)tileRect.x, (float)(tileRect.y + tileRect.height)}
+    std::vector<cv::Point2f> tileCorners = {
+        cv::Point2f(tileRect.x, tileRect.y),
+        cv::Point2f(tileRect.x + TILE_SIZE, tileRect.y),
+        cv::Point2f(tileRect.x + TILE_SIZE, tileRect.y + TILE_SIZE),
+        cv::Point2f(tileRect.x, tileRect.y + TILE_SIZE)
     };
-    std::vector<cv::Point2f> srcPts;
-    cv::perspectiveTransform(dstPts, srcPts, Hinv);
+
+    cv::Mat H_inv = H.inv();
+    std::vector<cv::Point2f> srcQuad;
+    cv::perspectiveTransform(tileCorners, srcQuad, H_inv);
+
+    cv::Rect srcBoundingBox = cv::boundingRect(srcQuad);
+    if ((srcBoundingBox & cv::Rect(0, 0, input.cols, input.rows)) != srcBoundingBox)
+        return cv::Mat();
+
+    cv::Mat croppedInput = input(srcBoundingBox).clone(); // think about a better alternative (memory-inefficient)
+
+    for (auto& pt : srcQuad) pt -= cv::Point2f(srcBoundingBox.x, srcBoundingBox.y);
+
     std::vector<cv::Point2f> dstQuad = {
-        {0, 0},
-        {(float)tileRect.width, 0},
-        {(float)tileRect.width, (float)tileRect.height},
-        {0, (float)tileRect.height}
+        cv::Point2f(0, 0),
+        cv::Point2f(TILE_SIZE, 0),
+        cv::Point2f(TILE_SIZE, TILE_SIZE),
+        cv::Point2f(0, TILE_SIZE)
     };
-    cv::Mat tileH = cv::getPerspectiveTransform(srcPts, dstQuad);
-    cv::Mat tile;
-    cv::warpPerspective(input, tile, tileH,
-                        cv::Size(tileRect.width, tileRect.height),
-                        cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
-    return tile;
+
+    cv::Mat tileOutput;
+    cv::Mat tileH = cv::getPerspectiveTransform(srcQuad, dstQuad);
+    cv::warpPerspective(croppedInput, tileOutput, tileH,
+                        cv::Size(TILE_SIZE, TILE_SIZE),
+                        cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0,0,0,0));
+
+    return tileOutput;
 }
 
 cv::Mat MosaicTileManager::computeTileHomography(const TileKey& tileKey, const cv::Mat& homography) {
@@ -191,8 +203,90 @@ cv::Mat MosaicTileManager::computeGlobalHomography(
     return offsetMat * localHomography;
 }
 
-void MosaicTileManager::applyImage(const std::string& imagePath,
-                                   const cv::Mat& homography)
+void MosaicTileManager::applyImageWarpOnce(const std::string& imagePath,
+                                           const cv::Mat& homography)
+{
+    auto [lat, lon] = extractGPS(imagePath);
+    double gsd = estimateGSD(imagePath);
+
+    cv::Mat img = cv::imread(imagePath, cv::IMREAD_UNCHANGED);
+    if (img.empty()) {
+        std::cerr << "Failed to load image: " << imagePath << "\n";
+        return;
+    }
+    if (img.channels() == 3) {
+        cv::cvtColor(img, img, cv::COLOR_BGR2BGRA);
+    }
+
+    // Warp image onto canvas
+    std::vector<cv::Point2f> corners = {
+        {0, 0},
+        {(float)img.cols, 0},
+        {(float)img.cols, (float)img.rows},
+        {0, (float)img.rows}
+    };
+    cv::perspectiveTransform(corners, corners, homography);
+
+    float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
+    for (const auto& p : corners) {
+        minX = std::min(minX, p.x);
+        minY = std::min(minY, p.y);
+        maxX = std::max(maxX, p.x);
+        maxY = std::max(maxY, p.y);
+    }
+
+    int width = std::ceil(maxX - minX);
+    int height = std::ceil(maxY - minY);
+
+    cv::Mat warpCanvas(height, width, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+
+    cv::Mat T = (cv::Mat_<double>(3, 3) <<
+        1, 0, -minX,
+        0, 1, -minY,
+        0, 0, 1);
+
+    cv::Mat fullHomography = T * homography;
+
+    cv::warpPerspective(img, warpCanvas, fullHomography, warpCanvas.size(),
+                        cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0, 0));
+
+    int tx0 = std::floor(minX / TILE_SIZE), ty0 = std::floor(minY / TILE_SIZE);
+    int tx1 = std::floor(maxX / TILE_SIZE), ty1 = std::floor(maxY / TILE_SIZE);
+
+    TileKey centerKey{ (tx0 + tx1) / 2, (ty0 + ty1) / 2 };
+
+    for (int ty = ty0; ty <= ty1; ++ty) {
+        for (int tx = tx0; tx <= tx1; ++tx) {
+            TileKey key{tx, ty};
+            cv::Rect globalTileRect(tx * TILE_SIZE, ty * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+            cv::Rect localTileRect(globalTileRect.x - minX, globalTileRect.y - minY, TILE_SIZE, TILE_SIZE);
+
+            cv::Mat tile = loadTile(key);
+
+            if (localTileRect.x < 0 || localTileRect.y < 0 ||
+                localTileRect.x + TILE_SIZE > warpCanvas.cols ||
+                localTileRect.y + TILE_SIZE > warpCanvas.rows) {
+                continue;
+            }
+
+            cv::Mat patch = warpCanvas(localTileRect);
+            for (int y = 0; y < TILE_SIZE; ++y) {
+                for (int x = 0; x < TILE_SIZE; ++x) {
+                    cv::Vec4b p = patch.at<cv::Vec4b>(y, x);
+                    if (p[3]) {
+                        tile.at<cv::Vec4b>(y, x) = p;
+                    }
+                }
+            }
+
+            auto [tileLat, tileLon] = calculateTileGPS(key, centerKey, lat, lon, gsd);
+            saveTile(key, tile, tileLat, tileLon, imagePath);
+        }
+    }
+}
+
+void MosaicTileManager::applyImagePerTile(const std::string& imagePath,
+                                          const cv::Mat& homography)
 {
     auto [lat, lon] = extractGPS(imagePath);
 
@@ -243,9 +337,20 @@ void MosaicTileManager::applyImage(const std::string& imagePath,
                     }
                 }
             }
-            auto [tileLat, tileLon] = calculateTileGPS(key, centerKey, lat, lon, gsd);
 
+            auto [tileLat, tileLon] = calculateTileGPS(key, centerKey, lat, lon, gsd);
             saveTile(key, tile, tileLat, tileLon, imagePath);
         }
+    }
+}
+
+void MosaicTileManager::applyImage(const std::string& imagePath,
+                                   const cv::Mat& homography,
+                                   bool warpOnce)
+{
+    if (warpOnce) {
+        applyImageWarpOnce(imagePath, homography);
+    } else {
+        applyImagePerTile(imagePath, homography);
     }
 }
