@@ -294,12 +294,16 @@ cv::Mat MosaicBuilder::getMosaicAroundTile(TileKey center, int radius, cv::Rect&
 bool MosaicBuilder::addImageToMosaic(const std::string& newImagePath) {
     auto bestTileKeyOpt = findClosestTile(newImagePath);
     if (!bestTileKeyOpt) return false;
+
+    int height = exiftool_.parseExifNumber(exiftool_.inExifTag(newImagePath, "ImageHeight"));
+    int width = exiftool_.parseExifNumber(exiftool_.inExifTag(newImagePath, "ImageWidth"));
+    int tileRadius = std::ceil(std::max(height, width) / float(TILE_SIZE)) / 2;
     
     TileKey bestKey = *bestTileKeyOpt;
-    TileKey localOriginKey{ bestKey.x - 1, bestKey.y - 1 };
+    TileKey localOriginKey{ bestKey.x - tileRadius, bestKey.y - tileRadius };
     
     cv::Rect localBounds;
-    cv::Mat localMosaic = getMosaicAroundTile(bestKey, 1, localBounds);
+    cv::Mat localMosaic = getMosaicAroundTile(bestKey, tileRadius, localBounds);
     if (localMosaic.empty()) {
         std::cerr << "Failed to build local mosaic.\n";
         return false;
