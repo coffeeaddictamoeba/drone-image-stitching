@@ -82,13 +82,25 @@ bool FeatureMatcher::computeHomography(const ImageMatrix img1, const ImageMatrix
 
     setWarped(img1.imagePath, img2.imagePath);
 
-    H = cv::findHomography(pts2, pts1, cv::RANSAC);
-    
-    std::cout << "Homography Matrix (Feature Matching):\n";
-    if (!H.empty()) {
-        std::cout << H << '\n';
-    } else {
-        std::cerr << "[ERROR] Homography computation returned an empty matrix.\n";
+    cv::Mat inlierMask;
+    cv::Mat affine = cv::estimateAffinePartial2D(pts2, pts1, inlierMask, cv::RANSAC, 3.0);
+
+    if (cv::countNonZero(inlierMask) < 100) {
+        std::cerr << "[ERROR] Too few inliers after affine estimation (" << cv::countNonZero(inlierMask) << "). Skipping this image.\n";
+        return false;
+    }
+
+    if (!affine.empty()) {
+        cv::Mat H_affine = cv::Mat::eye(3, 3, affine.type());
+        affine.copyTo(H_affine(cv::Rect(0, 0, 3, 2)));
+        H = H_affine;
+        std::cout << "Fallback: Affine transform used (converted to homography):\n" << H << '\n';
+
+        double detH = cv::determinant(H);
+        if (std::abs(detH) < 0.05 || std::abs(1.0 / detH) > 20.0) {
+            std::cerr << "[ERROR] Suspicious homography (det = " << detH << "). Skipping image.\n";
+            return false;
+        }
     }
 
     return !H.empty();
