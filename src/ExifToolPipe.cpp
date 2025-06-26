@@ -128,6 +128,19 @@ double ExifToolPipe::parseExifNumber(const std::string& value) const {
     throw std::runtime_error("Failed to parse EXIF numeric value: " + value);
 }
 
+double ExifToolPipe::parseExifGPS(const std::string& value) const {
+    std::string str = std::regex_replace(value, std::regex("^ +| +$|( ) +"), "$1");
+    std::smatch match;
+    std::regex dmsRegex(R"((\d+)[^\d]+(\d+)[^\d]+([\d.]+))"); // DMS format: 54 deg 54' 19.67"
+    if (std::regex_search(str, match, dmsRegex) && match.size() == 4) {
+        double degrees = std::stod(match[1]);
+        double minutes = std::stod(match[2]);
+        double seconds = std::stod(match[3]);
+        return degrees + minutes / 60.0 + seconds / 3600.0;
+    }
+    throw std::runtime_error("Failed to parse EXIF GPS value: " + value);
+}
+
 bool ExifToolPipe::setExifTag(const std::string& imagePath, const std::string& args) {
     std::ostringstream cmd;
     cmd << args << "\n" << imagePath << "\n" << "-overwrite_original_in_place";

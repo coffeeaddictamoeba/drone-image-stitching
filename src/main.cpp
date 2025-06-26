@@ -33,10 +33,10 @@ int main(int argc, char** argv) {
 
     try {
         ExifToolPipe exiftool;
-        MosaicTileManager tileManager(outputDir, exiftool);
-        MosaicBuilder builder(refImage, targetImage, exiftool, tileManager);
+        TileManager tileManager(outputDir, exiftool);
+        MosaicBuilder builder(exiftool, tileManager);
 
-        if (!builder.stitchToTiles()) {
+        if (!builder.stitchToTiles(refImage, targetImage)) {
             std::cerr << "Mosaic stitching failed.\n";
             return 1;
         }

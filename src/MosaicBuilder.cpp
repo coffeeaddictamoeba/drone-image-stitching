@@ -8,16 +8,9 @@
 
 namespace fs = std::filesystem;
 
-MosaicBuilder::MosaicBuilder(const std::string& refImagePath,
-    const std::string& targetImagePath,
-    ExifToolPipe& tool,
-    MosaicTileManager& tileManager)
-    : refImagePath_(refImagePath),
-      targetImagePath_(targetImagePath),
-      exiftool_(tool),
-      tiles_(tileManager) {}
+MosaicBuilder::MosaicBuilder(ExifToolPipe& tool, TileManager& tileManager) : exiftool_(tool), tiles_(tileManager) {}
 
-ImageMatrix MosaicBuilder::toImageMatrix(std::string imagePath) {
+ImageMatrix MosaicBuilder::toImageMatrix(std::string imagePath) const {
     cv::Mat matrix = cv::imread(imagePath, cv::IMREAD_UNCHANGED);
     if (matrix.empty()) {
         std::cerr << "Failed to load the image.\n";
@@ -26,21 +19,13 @@ ImageMatrix MosaicBuilder::toImageMatrix(std::string imagePath) {
     return ImageMatrix{matrix, imagePath};
 }
 
-bool MosaicBuilder::loadImages() {
-    ref_ = toImageMatrix(refImagePath_);
-    target_ = toImageMatrix(targetImagePath_);
-    return !ref_.imageMatrix.empty() && !target_.imageMatrix.empty();
-}
-
 bool MosaicBuilder::loadImages(std::string refImagePath, std::string targetImagePath) {
     ref_ = toImageMatrix(refImagePath);
     target_ = toImageMatrix(targetImagePath);
     return !ref_.imageMatrix.empty() && !target_.imageMatrix.empty();
 }
 
-bool MosaicBuilder::alignImages(const ImageMatrix& src,
-                                const ImageMatrix& dst,
-                                cv::Mat& H)
+bool MosaicBuilder::alignImages(const ImageMatrix& src, const ImageMatrix& dst, cv::Mat& H)
 {
     FeatureMatcher matcher(exiftool_, "SIFT");
     std::vector<cv::DMatch> matches;
@@ -48,20 +33,6 @@ bool MosaicBuilder::alignImages(const ImageMatrix& src,
         std::cerr << "Feature matching failed.\n";
         return false;
     }
-    return true;
-}
-
-bool MosaicBuilder::stitchToTiles() {
-    if (!loadImages()) {
-        std::cerr << "Failed to load input images.\n";
-        return false;
-    }
-
-    tiles_.applyImage(refImagePath_, cv::Mat::eye(3, 3, CV_64F), false);    
-
-    if (!alignImages(ref_, target_, homography_)) { return false; }
-
-    tiles_.applyImage(targetImagePath_, homography_, false);
     return true;
 }
 
@@ -80,13 +51,7 @@ bool MosaicBuilder::stitchToTiles(std::string refImagePath, std::string targetIm
 }
 
 // Mosaic from tiles: fixed size
-cv::Mat MosaicBuilder::mosaicFromTiles(
-    const std::string& tileDir, 
-    cv::Rect& mosaicBounds, 
-    int startX, 
-    int startY, 
-    int endX,
-    int endY) {
+cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mosaicBounds, int startX, int startY, int endX, int endY) {
     std::map<std::pair<int, int>, std::string> tileMap;
 
     for (const auto& entry : fs::directory_iterator(tileDir)) {
@@ -181,6 +146,8 @@ cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mos
     return mosaic;
 }
 
+// TODO: add mosaicFromTiles by image size and offset (e.g, "TOP_RIGHT")
+
 bool MosaicBuilder::isValidTile(std::string tilePath) {
     cv::Mat img = cv::imread(tilePath, cv::IMREAD_UNCHANGED);
     if (img.empty()) {
@@ -211,12 +178,12 @@ bool MosaicBuilder::isValidTile(std::string tilePath) {
         std::cout << "Skipping visually uniform tile: " << tilePath << "\n";
         return false;
     }
-
     return true;
 }
 
 double MosaicBuilder::findTileDistance(std::string tilePath, double latToCompare, double lonToCompare) {
-    auto [lat, lon] = tiles_.extractGPS(tilePath);
+    double lat = exiftool_.parseExifGPS(exiftool_.inExifTag(tilePath, IMG_GPS_LAT));
+    double lon = exiftool_.parseExifGPS(exiftool_.inExifTag(tilePath, IMG_GPS_LON));
 
     double dLat = (lat - latToCompare) * DEG_TO_RAD;
     double dLon = (lon - lonToCompare) * DEG_TO_RAD;
@@ -232,7 +199,8 @@ double MosaicBuilder::findTileDistance(std::string tilePath, double latToCompare
 }
 
 std::optional<TileKey> MosaicBuilder::findClosestTile(const std::string& imagePath) {
-    auto [lat1, lon1] = tiles_.extractGPS(imagePath);
+    double lat1 = exiftool_.parseExifGPS(exiftool_.inExifTag(imagePath, IMG_GPS_LAT));
+    double lon1 = exiftool_.parseExifGPS(exiftool_.inExifTag(imagePath, IMG_GPS_LON));
 
     double bestDist = DBL_MAX;
     std::optional<TileKey> bestKey;
@@ -261,7 +229,6 @@ std::optional<TileKey> MosaicBuilder::findClosestTile(const std::string& imagePa
     return bestKey;
 }
 
-// Get mosaic around central tile 3x3 size
 cv::Mat MosaicBuilder::getMosaicAroundTile(TileKey center, int radius, cv::Rect& outBounds) {
     int minX = center.x - radius;
     int maxX = center.x + radius;
@@ -295,8 +262,8 @@ bool MosaicBuilder::addImageToMosaic(const std::string& newImagePath) {
     auto bestTileKeyOpt = findClosestTile(newImagePath);
     if (!bestTileKeyOpt) return false;
 
-    int height = exiftool_.parseExifNumber(exiftool_.inExifTag(newImagePath, "ImageHeight"));
-    int width = exiftool_.parseExifNumber(exiftool_.inExifTag(newImagePath, "ImageWidth"));
+    int height = exiftool_.parseExifNumber(exiftool_.inExifTag(newImagePath, IMG_HEIGHT_TAG));
+    int width = exiftool_.parseExifNumber(exiftool_.inExifTag(newImagePath, IMG_WIDTH_TAG));
     int tileRadius = std::ceil(std::max(height, width) / float(TILE_SIZE)) / 2;
     
     TileKey bestKey = *bestTileKeyOpt;
@@ -309,13 +276,20 @@ bool MosaicBuilder::addImageToMosaic(const std::string& newImagePath) {
         return false;
     }
     
-    ImageMatrix mosaicMatrix{localMosaic, "local mosaic"};
+    ImageMatrix mosaicMatrix{localMosaic, ""};
     ImageMatrix newImageMatrix = toImageMatrix(newImagePath);
     
     cv::Mat H;
+
     if (!alignImages(newImageMatrix, mosaicMatrix, H)) return false;
+    std::cout << "H: \n" << H << "\n";
+    std::cout << "det(H): " << cv::determinant(H) << "\n";
 
     H = H.inv();
+    std::cout << "det(H) inv: " << cv::determinant(H) << "\n";
+
+    H = H / H.at<double>(2, 2);
+    std::cout << "det(H) norm: " << cv::determinant(H) << "\n";
     cv::Mat withOffset = tiles_.computeGlobalHomography(localOriginKey, H);
     
     tiles_.applyImage(newImagePath, withOffset, true);

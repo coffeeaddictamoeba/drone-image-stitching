@@ -8,68 +8,31 @@
 
 namespace fs = std::filesystem;
 
-MosaicTileManager::MosaicTileManager(const std::string& outputDir, ExifToolPipe& tool)
+TileManager::TileManager(const std::string& outputDir, ExifToolPipe& tool)
     : outputDirectory_(outputDir), exiftool_(tool)
 {
     std::filesystem::create_directories(outputDirectory_);
 }
 
-TileKey MosaicTileManager::getTileKeyForPoint(int x, int y) const {
+TileKey TileManager::getTileKeyForPoint(int x, int y) const {
     return { x / TILE_SIZE, y / TILE_SIZE };
 }
 
-std::string MosaicTileManager::getOutputDirectory() const {
+std::string TileManager::getOutputDirectory() const {
     return outputDirectory_;
 }
 
-std::string MosaicTileManager::getTilePath(const TileKey& key) const {
+std::string TileManager::getTilePath(const TileKey& key) const {
     return outputDirectory_ + "/tile_" + std::to_string(key.y) + "_" + std::to_string(key.x) + ".png";
 }
 
-// TODO: make more flexible
-std::pair<double, double> MosaicTileManager::extractGPS(const std::string& imagePath) const {
-    auto parseCoordinate = [](const std::string& value) -> double {
-        std::string str = std::regex_replace(value, std::regex("^ +| +$|( ) +"), "$1");
-
-        try {
-            return std::stod(str);
-        } catch (...) {
-
-        }
-
-        std::smatch match;
-        std::regex dmsRegex(R"((\d+)[^\d]+(\d+)[^\d]+([\d.]+))"); // DMS format: 54 deg 54' 19.67"
-        if (std::regex_search(str, match, dmsRegex) && match.size() == 4) {
-            double degrees = std::stod(match[1]);
-            double minutes = std::stod(match[2]);
-            double seconds = std::stod(match[3]);
-            return degrees + minutes / 60.0 + seconds / 3600.0;
-        }
-
-        throw std::runtime_error("Failed to parse GPS coordinate: " + str);
-    };
-
-    std::string latStr = exiftool_.inExifTag(imagePath, "GPSLatitude");
-    std::string lonStr = exiftool_.inExifTag(imagePath, "GPSLongitude");
-
-    if (latStr.empty() || lonStr.empty()) {
-        throw std::runtime_error("Missing GPS metadata in image: " + imagePath);
-    }
-
-    double lat = parseCoordinate(latStr);
-    double lon = parseCoordinate(lonStr);
-
-    return { lat, lon };
-}
-
-// Make tags as constants?
-double MosaicTileManager::estimateGSD(const std::string& imagePath) const {
+double TileManager::estimateGSD(const std::string& imagePath) const {
     // Constants for Pi Camera V2
     const double sensorWidth = 3.674; // mm
 
-    std::string altitudeStr = exiftool_.inExifTag(imagePath, "GPSAltitude");
-    std::string focalStr = exiftool_.inExifTag(imagePath, "FocalLength");
-    std::string widthStr = exiftool_.inExifTag(imagePath, "ImageWidth");
+    std::string altitudeStr = exiftool_.inExifTag(imagePath, IMG_GPS_ALT);
+    std::string focalStr = exiftool_.inExifTag(imagePath, IMG_FOCAL_LEN_TAG);
+    std::string widthStr = exiftool_.inExifTag(imagePath, IMG_WIDTH_TAG);
 
     if (altitudeStr.empty() || focalStr.empty() || widthStr.empty()) {
         throw std::runtime_error("Missing required EXIF tags for GSD computation.");
@@ -85,13 +48,7 @@ double MosaicTileManager::estimateGSD(const std::string& imagePath) const {
     return (sensorWidth * altitude) / (focalLength * imageWidth); // m/px
 }
 
-std::pair<double, double> MosaicTileManager::calculateTileGPS(
-    const TileKey& tileKey,
-    const TileKey& centerTile,
-    double centerLat,
-    double centerLon,
-    double gsd) const
-{
+std::pair<double, double> TileManager::calculateTileGPS(const TileKey& tileKey, const TileKey& centerTile, double centerLat, double centerLon, double gsd) const {
     int dx = tileKey.x - centerTile.x;
     int dy = tileKey.y - centerTile.y;
 
@@ -106,7 +63,7 @@ std::pair<double, double> MosaicTileManager::calculateTileGPS(
     return {lat, lon};
 }
 
-cv::Mat MosaicTileManager::loadTile(const TileKey& key) const {
+cv::Mat TileManager::loadTile(const TileKey& key) const {
     std::string path = getTilePath(key);
     if (fs::exists(path)) {
         cv::Mat tile = cv::imread(path, cv::IMREAD_UNCHANGED);
@@ -115,7 +72,7 @@ cv::Mat MosaicTileManager::loadTile(const TileKey& key) const {
     return cv::Mat(TILE_SIZE, TILE_SIZE, CV_8UC4, cv::Scalar(0, 0, 0, 0));
 }
 
-void MosaicTileManager::assignMetadata(const std::string imagePath, const double lat, const double lon, const double alt, const double flen) const {
+void TileManager::assignMetadata(const std::string imagePath, const double lat, const double lon, const double alt, const double flen) const {
     std::ostringstream tagStream;
     tagStream << "-n\n";
     tagStream << "-GPSLatitude=" << lat << "\n";
@@ -126,7 +83,7 @@ void MosaicTileManager::assignMetadata(const std::string imagePath, const double
     exiftool_.setExifTag(imagePath, tagStream.str());
 }
 
-void MosaicTileManager::saveTile(const TileKey& key, const cv::Mat& tile, const double lat, const double lon, const std::string imagePath) const {
+void TileManager::saveTile(const TileKey& key, const cv::Mat& tile, const double lat, const double lon, const std::string imagePath) const {
     std::string path = getTilePath(key);
     cv::imwrite(path, tile);
     
@@ -135,10 +92,7 @@ void MosaicTileManager::saveTile(const TileKey& key, const cv::Mat& tile, const 
     assignMetadata(path, lat, lon, alt, flen);
 }
 
-cv::Mat MosaicTileManager::warpTileRegion(const cv::Mat& input,
-                                          const cv::Mat& H,
-                                          const cv::Rect& tileRect) const
-{
+cv::Mat TileManager::warpTileRegion(const cv::Mat& input, const cv::Mat& H, const cv::Rect& tileRect) const {
     // it omits images with anything transparent + does not increase size. FIX
     std::vector<cv::Point2f> tileCorners = {
         cv::Point2f(tileRect.x, tileRect.y),
@@ -175,24 +129,7 @@ cv::Mat MosaicTileManager::warpTileRegion(const cv::Mat& input,
     return tileOutput;
 }
 
-cv::Mat MosaicTileManager::computeTileHomography(const TileKey& tileKey, const cv::Mat& homography) {
-    double offsetX = tileKey.x * TILE_SIZE;
-    double offsetY = tileKey.y * TILE_SIZE;
-
-    cv::Mat T_offset = (cv::Mat_<double>(3, 3) <<
-        1, 0, offsetX,
-        0, 1, offsetY,
-        0, 0, 1);
-
-    cv::Mat adjustedHomography = homography * T_offset;
-
-    return adjustedHomography;
-}
-
-cv::Mat MosaicTileManager::computeGlobalHomography(
-    const TileKey& localOriginKey,
-    const cv::Mat& localHomography)
-{
+cv::Mat TileManager::computeGlobalHomography(const TileKey& localOriginKey, const cv::Mat& localHomography) {
     double offsetX = localOriginKey.x * TILE_SIZE;
     double offsetY = localOriginKey.y * TILE_SIZE;
 
@@ -204,10 +141,9 @@ cv::Mat MosaicTileManager::computeGlobalHomography(
     return offsetMat * localHomography;
 }
 
-void MosaicTileManager::applyImageWarpOnce(const std::string& imagePath,
-                                           const cv::Mat& homography)
-{
-    auto [lat, lon] = extractGPS(imagePath);
+void TileManager::applyImageWarpOnce(const std::string& imagePath, const cv::Mat& homography) {
+    auto lat = exiftool_.parseExifGPS(exiftool_.inExifTag(imagePath, IMG_GPS_LAT));
+    auto lon = exiftool_.parseExifGPS(exiftool_.inExifTag(imagePath, IMG_GPS_LON));
     double gsd = estimateGSD(imagePath);
 
     cv::Mat img = cv::imread(imagePath, cv::IMREAD_UNCHANGED);
@@ -219,7 +155,6 @@ void MosaicTileManager::applyImageWarpOnce(const std::string& imagePath,
         cv::cvtColor(img, img, cv::COLOR_BGR2BGRA);
     }
 
-    // Warp image onto canvas
     std::vector<cv::Point2f> corners = {
         {0, 0},
         {(float)img.cols, 0},
@@ -286,10 +221,9 @@ void MosaicTileManager::applyImageWarpOnce(const std::string& imagePath,
     }
 }
 
-void MosaicTileManager::applyImagePerTile(const std::string& imagePath,
-                                          const cv::Mat& homography)
-{
-    auto [lat, lon] = extractGPS(imagePath);
+void TileManager::applyImagePerTile(const std::string& imagePath, const cv::Mat& homography) {
+    auto lat = exiftool_.parseExifGPS(exiftool_.inExifTag(imagePath, IMG_GPS_LAT));
+    auto lon = exiftool_.parseExifGPS(exiftool_.inExifTag(imagePath, IMG_GPS_LON));
 
     cv::Mat img = cv::imread(imagePath, cv::IMREAD_UNCHANGED);
     if (img.empty()) {
@@ -353,11 +287,7 @@ void MosaicTileManager::applyImagePerTile(const std::string& imagePath,
     }
 }
 
-
-void MosaicTileManager::applyImage(const std::string& imagePath,
-                                   const cv::Mat& homography,
-                                   bool warpOnce)
-{
+void TileManager::applyImage(const std::string& imagePath, const cv::Mat& homography, bool warpOnce) {
     if (warpOnce) {
         applyImageWarpOnce(imagePath, homography);
     } else {
