@@ -13,8 +13,7 @@ struct ImageMatrix {
 class FeatureMatcher {
 public:
     FeatureMatcher(ExifToolPipe& tool, const std::string& detectorType = "SIFT");
-    bool setWarped(const std::string& firstPath, const std::string& secondPath);
-    bool computeHomography(const ImageMatrix img1, const ImageMatrix img2, cv::Mat& H, std::vector<cv::DMatch>& goodMatches);
+    bool computeHomography(const ImageMatrix src, const ImageMatrix dst, cv::Mat& H, std::vector<cv::DMatch>& goodMatches);
 
 private:
     cv::Ptr<cv::Feature2D> detector;

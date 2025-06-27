@@ -8,9 +8,7 @@
 
 namespace fs = std::filesystem;
 
-TileManager::TileManager(const std::string& outputDir, ExifToolPipe& tool)
-    : outputDirectory_(outputDir), exiftool_(tool)
-{
+TileManager::TileManager(const std::string& outputDir, ExifToolPipe& tool): outputDirectory_(outputDir), exiftool_(tool) {
     std::filesystem::create_directories(outputDirectory_);
 }
 
@@ -75,10 +73,10 @@ cv::Mat TileManager::loadTile(const TileKey& key) const {
 void TileManager::assignMetadata(const std::string imagePath, const double lat, const double lon, const double alt, const double flen) const {
     std::ostringstream tagStream;
     tagStream << "-n\n";
-    tagStream << "-GPSLatitude=" << lat << "\n";
-    tagStream << "-GPSLongitude=" << lon << "\n";
-    tagStream << "-GPSAltitude=" << alt << "\n";
-    tagStream << "-FocalLength=" << flen << "\n";
+    tagStream << "-" << IMG_GPS_LAT << "=" << lat << "\n";
+    tagStream << "-" << IMG_GPS_LON << "=" << lon << "\n";
+    tagStream << "-" << IMG_GPS_ALT << "=" << alt << "\n";
+    tagStream << "-" << IMG_FOCAL_LEN_TAG << "=" << flen << "\n";
 
     exiftool_.setExifTag(imagePath, tagStream.str());
 }

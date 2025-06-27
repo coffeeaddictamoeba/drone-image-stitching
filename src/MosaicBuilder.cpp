@@ -5,6 +5,8 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#include <thread>
+#include <future>
 
 namespace fs = std::filesystem;
 
@@ -25,8 +27,7 @@ bool MosaicBuilder::loadImages(std::string refImagePath, std::string targetImage
     return !ref_.imageMatrix.empty() && !target_.imageMatrix.empty();
 }
 
-bool MosaicBuilder::alignImages(const ImageMatrix& src, const ImageMatrix& dst, cv::Mat& H)
-{
+bool MosaicBuilder::alignImages(const ImageMatrix& src, const ImageMatrix& dst, cv::Mat& H) {
     FeatureMatcher matcher(exiftool_, "SIFT");
     std::vector<cv::DMatch> matches;
     if (!matcher.computeHomography(src, dst, H, matches)) {
@@ -161,7 +162,7 @@ bool MosaicBuilder::isValidTile(std::string tilePath) {
         double minAlpha, maxAlpha;
         cv::minMaxLoc(channels[3], &minAlpha, &maxAlpha);
         if (maxAlpha < 1) {
-            std::cout << "Skipping fully transparent tile: " << tilePath << "\n";
+            //std::cout << "Skipping fully transparent tile: " << tilePath << "\n";
             return false;
         }
     }
@@ -175,7 +176,7 @@ bool MosaicBuilder::isValidTile(std::string tilePath) {
     double minVal, maxVal;
     cv::minMaxLoc(gray, &minVal, &maxVal);
     if (std::abs(maxVal - minVal) < 1e-3) {
-        std::cout << "Skipping visually uniform tile: " << tilePath << "\n";
+        //std::cout << "Skipping visually uniform tile: " << tilePath << "\n";
         return false;
     }
     return true;
@@ -198,9 +199,63 @@ double MosaicBuilder::findTileDistance(std::string tilePath, double latToCompare
     return R_M * c; // distance in meters
 }
 
+// function for searching best tile for feature matching. works well but quite unnecessary for now
+std::optional<TileKey> MosaicBuilder::findBestMatchingTileInRadius(const cv::Mat& image, const TileKey& centerTile, int radius) {
+    const int maxThreads = 3; // test with other amounts
+    std::vector<std::future<std::pair<TileKey, int>>> futures;
+
+    for (int dy = -radius; dy <= radius; ++dy) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            TileKey candidate{centerTile.x + dx, centerTile.y + dy};
+            std::string tilePath = tiles_.getTilePath(candidate);
+            //std::cout << "Evaluating tile " << tilePath << '\n';
+
+            if (!fs::exists(tilePath) || !isValidTile(tilePath)) continue;
+
+            futures.emplace_back(std::async(std::launch::async, [=]() -> std::pair<TileKey, int> {
+                FeatureMatcher matcher{exiftool_, "SIFT"};
+                cv::Mat H;
+                std::vector<cv::DMatch> matches;
+
+                ImageMatrix imgNew{image, "New Image"};
+                ImageMatrix imgTile = toImageMatrix(tilePath);
+                if (!alignImages(imgNew, imgTile, H)) return {centerTile, 0}; // fix when the best gps tile returns no matches
+
+                bool success = matcher.computeHomography(imgNew, imgTile, H, matches);
+                return {candidate, success ? static_cast<int>(matches.size()) : 0};
+            }));
+
+            if ((int)futures.size() >= maxThreads * 2) break;
+        }
+    }
+
+    int bestMatchCount = -1;
+    std::optional<TileKey> bestTile;
+    for (auto& fut : futures) {
+        auto [tile, count] = fut.get();
+        if (count > bestMatchCount) {
+            bestMatchCount = count;
+            bestTile = tile;
+        }
+    }
+
+    if (bestTile) {
+        std::cout << "Best tile based on feature match: " << tiles_.getTilePath(*bestTile) << " with " << bestMatchCount << " good matches.\n";
+    } else {
+        std::cerr << "[WARN] No tile produced valid feature matches.\n";
+    }
+
+    return bestTile;
+}
+
 std::optional<TileKey> MosaicBuilder::findClosestTile(const std::string& imagePath) {
     double lat1 = exiftool_.parseExifGPS(exiftool_.inExifTag(imagePath, IMG_GPS_LAT));
     double lon1 = exiftool_.parseExifGPS(exiftool_.inExifTag(imagePath, IMG_GPS_LON));
+
+    if (lat1 == 0.0 || lon1 == 0.0) {
+        std::cerr << "[WARN] Image has no valid GPS coordinates.\n";
+        return std::nullopt;
+    }
 
     double bestDist = DBL_MAX;
     std::optional<TileKey> bestKey;
@@ -214,18 +269,32 @@ std::optional<TileKey> MosaicBuilder::findClosestTile(const std::string& imagePa
         int tx = std::stoi(match[2]);
         std::string tilePath = entry.path().string();
 
-        if (!isValidTile(tilePath)) continue;
+        if (!isValidTile(tilePath)) continue;  // Check for valid tile, coverage, metadata, etc.
 
         double dist = findTileDistance(tilePath, lat1, lon1);
-
-        if (dist < bestDist || (std::abs(dist - bestDist) < 1e-6 &&
-            (tx < bestKey->x || (tx == bestKey->x && ty < bestKey->y)))) {
+        if (dist < bestDist) {
             bestDist = dist;
             bestKey = TileKey{tx, ty};
         }
     }
-    TileKey key = *bestKey;
-    std::cout << "The best matching tile: " << tiles_.getTilePath(key) << '\n';
+
+    if (!bestKey) {
+        std::cerr << "[ERROR] No suitable tile found.\n";
+        return std::nullopt;
+    }
+
+    std::cout << "Tile candidate (GPS closest): " << tiles_.getTilePath(*bestKey) << '\n';
+
+    // relates to best tile by feature match. may be useful later.
+    // cv::Mat img = cv::imread(imagePath, cv::IMREAD_COLOR);
+    // if (img.empty()) {
+    //     std::cerr << "[ERROR] Could not load image for radius estimation.\n";
+    //     return bestKey;
+    // }
+
+    // cv::Mat image = cv::imread(imagePath, cv::IMREAD_UNCHANGED);
+    // return findBestMatchingTileInRadius(image, *bestKey, 1); // 3x3 field
+
     return bestKey;
 }
 
@@ -276,7 +345,7 @@ bool MosaicBuilder::addImageToMosaic(const std::string& newImagePath) {
         return false;
     }
     
-    ImageMatrix mosaicMatrix{localMosaic, ""};
+    ImageMatrix mosaicMatrix{localMosaic, "Mosaic"};
     ImageMatrix newImageMatrix = toImageMatrix(newImagePath);
     
     cv::Mat H;

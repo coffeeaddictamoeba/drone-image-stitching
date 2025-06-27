@@ -84,4 +84,5 @@ private:
     double findTileDistance(std::string tilePath, double latToCompare, double lonToCompare);
     std::optional<TileKey> findClosestTile(const std::string& imagePath);
     cv::Mat getMosaicAroundTile(TileKey center, int radius, cv::Rect& outBounds);
+    std::optional<TileKey> findBestMatchingTileInRadius(const cv::Mat& image, const TileKey& centerTile, int radius);
 };
