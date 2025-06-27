@@ -104,7 +104,7 @@ int main(int argc, char** argv) {
         std::string refImage = argv[1];
         std::string targetImage = argv[2];
         std::string outputDir = argv[3];
-        std::cout << "Building new mosaic...";
+        std::cout << "Building new mosaic...\n";
         buildMosaic(refImage, targetImage, outputDir); // in future this can be used in case image does not match the existing mosaic not to lose the data
         return 0;
     } else if (argc == 2) {

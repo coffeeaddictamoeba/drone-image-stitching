@@ -256,10 +256,12 @@ void TileManager::applyImage(const std::string& imagePath, const cv::Mat& homogr
     auto rawExif = exiftool_.getExifTags(imagePath, sharedTags);
     auto exif = exiftool_.parseExifValuesToNumbers(rawExif);
 
+    // #ifdef DEBUG
     // std::cout << "EXIF values:\n";
     // for (const auto& [key, value] : exif) {
     //     std::cout << key << ": " << value << "\n";
     // }
+    // #endif
 
     double lat = exiftool_.parseExifGPS(rawExif.at(IMG_GPS_LAT));
     double lon = exiftool_.parseExifGPS(rawExif.at(IMG_GPS_LON));

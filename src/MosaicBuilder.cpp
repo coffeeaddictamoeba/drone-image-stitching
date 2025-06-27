@@ -53,7 +53,7 @@ bool MosaicBuilder::stitchToTiles(std::string refImagePath, std::string targetIm
 
 // Mosaic from tiles: fixed size
 cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mosaicBounds, int startX, int startY, int endX, int endY) {
-    std::map<std::pair<int, int>, std::string> tileMap;
+    std::vector<std::tuple<int, int, std::string>> tiles;
 
     for (const auto& entry : fs::directory_iterator(tileDir)) {
         if (!entry.is_regular_file()) continue;
@@ -63,7 +63,7 @@ cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mos
         if (std::regex_match(filename, match, TILE_REGEX)) {
             int ty = std::stoi(match[1]);
             int tx = std::stoi(match[2]);
-            tileMap[{tx, ty}] = entry.path().string();
+            tiles.emplace_back(tx, ty, entry.path().string());
 
             startX = std::min(startX, tx);
             startY = std::min(startY, ty);
@@ -72,7 +72,7 @@ cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mos
         }
     }
 
-    if (tileMap.empty()) {
+    if (tiles.empty()) {
         std::cerr << "No tiles found in: " << tileDir << "\n";
         return {};
     }
@@ -82,19 +82,38 @@ cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mos
     mosaicBounds = cv::Rect(startX * TILE_SIZE, startY * TILE_SIZE, mosaicWidth, mosaicHeight);
 
     cv::Mat mosaic(mosaicHeight, mosaicWidth, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+    std::mutex mosaicMutex;
 
-    for (const auto& [key, path] : tileMap) {
-        int tx = key.first, ty = key.second;
-        cv::Mat tile = cv::imread(path, cv::IMREAD_UNCHANGED);
-        if (tile.empty()) {
-            std::cerr << "Failed to read tile: " << path << "\n";
-            continue;
-        }
-        int x = (tx - startX) * TILE_SIZE;
-        int y = (ty - startY) * TILE_SIZE;
+    const unsigned numThreads = std::thread::hardware_concurrency();
+    size_t tilesPerThread = (tiles.size() + numThreads - 1) / numThreads;
 
-        tile.copyTo(mosaic(cv::Rect(x, y, TILE_SIZE, TILE_SIZE)));
+    std::vector<std::future<void>> futures;
+
+    for (unsigned i = 0; i < numThreads; ++i) {
+        size_t begin = i * tilesPerThread;
+        size_t end = std::min(begin + tilesPerThread, tiles.size());
+        if (begin >= end) break;
+
+        futures.emplace_back(std::async(std::launch::async, [&, begin, end]() {
+            for (size_t j = begin; j < end; ++j) {
+                auto [tx, ty, path] = tiles[j];
+                cv::Mat tile = cv::imread(path, cv::IMREAD_UNCHANGED);
+                if (tile.empty()) {
+                    std::cerr << "Failed to read tile: " << path << "\n";
+                    continue;
+                }
+
+                int x = (tx - startX) * TILE_SIZE;
+                int y = (ty - startY) * TILE_SIZE;
+
+                std::lock_guard<std::mutex> lock(mosaicMutex);
+                tile.copyTo(mosaic(cv::Rect(x, y, TILE_SIZE, TILE_SIZE)));
+            }
+        }));
     }
+
+    for (auto& fut : futures) { fut.get(); }
+
     return mosaic;
 }
 
@@ -132,18 +151,33 @@ cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mos
 
     cv::Mat mosaic(mosaicHeight, mosaicWidth, CV_8UC4, cv::Scalar(0, 0, 0, 0));
 
-    for (const auto& [key, path] : tileMap) {
-        int tx = key.first, ty = key.second;
-        cv::Mat tile = cv::imread(path, cv::IMREAD_UNCHANGED);
-        if (tile.empty()) {
-            std::cerr << "Failed to read tile: " << path << "\n";
-            continue;
-        }
-        int x = (tx - minX) * TILE_SIZE;
-        int y = (ty - minY) * TILE_SIZE;
+    std::mutex mosaicMutex;
 
-        tile.copyTo(mosaic(cv::Rect(x, y, TILE_SIZE, TILE_SIZE)));
+    std::vector<std::future<void>> futures;
+
+    for (const auto& [key, path] : tileMap) {
+        futures.emplace_back(std::async(std::launch::async, [&mosaic, &mosaicMutex, path, key, minX, minY]() {
+            int tx = key.first;
+            int ty = key.second;
+
+            cv::Mat tile = cv::imread(path, cv::IMREAD_UNCHANGED);
+            if (tile.empty()) {
+                std::cerr << "Failed to read tile: " << path << "\n";
+                return;
+            }
+
+            int x = (tx - minX) * TILE_SIZE;
+            int y = (ty - minY) * TILE_SIZE;
+
+            {
+                std::lock_guard<std::mutex> lock(mosaicMutex);
+                tile.copyTo(mosaic(cv::Rect(x, y, TILE_SIZE, TILE_SIZE)));
+            }
+        }));
     }
+
+    for (auto& f : futures) { f.get(); }
+
     return mosaic;
 }
 
@@ -243,7 +277,9 @@ bool MosaicBuilder::isValidTile(std::string tilePath) {
         double minAlpha, maxAlpha;
         cv::minMaxLoc(channels[3], &minAlpha, &maxAlpha);
         if (maxAlpha < 1) {
-            //std::cout << "Skipping fully transparent tile: " << tilePath << "\n";
+            #ifdef DEBUG
+            std::cout << "Skipping fully transparent tile: " << tilePath << "\n";
+            #endif
             return false;
         }
     }
@@ -257,7 +293,9 @@ bool MosaicBuilder::isValidTile(std::string tilePath) {
     double minVal, maxVal;
     cv::minMaxLoc(gray, &minVal, &maxVal);
     if (std::abs(maxVal - minVal) < 1e-3) {
-        //std::cout << "Skipping visually uniform tile: " << tilePath << "\n";
+        #ifdef DEBUG
+        std::cout << "Skipping visually uniform tile: " << tilePath << "\n";
+        #endif
         return false;
     }
     return true;
@@ -289,7 +327,9 @@ std::optional<TileKey> MosaicBuilder::findBestMatchingTileInRadius(const cv::Mat
         for (int dx = -radius; dx <= radius; ++dx) {
             TileKey candidate{centerTile.x + dx, centerTile.y + dy};
             std::string tilePath = tiles_.getTilePath(candidate);
-            //std::cout << "Evaluating tile " << tilePath << '\n';
+            #ifdef DEBUG
+            std::cout << "Evaluating tile " << tilePath << '\n';
+            #endif
 
             if (!fs::exists(tilePath) || !isValidTile(tilePath)) continue;
 
@@ -321,9 +361,13 @@ std::optional<TileKey> MosaicBuilder::findBestMatchingTileInRadius(const cv::Mat
     }
 
     if (bestTile) {
+        #ifdef DEBUG
         std::cout << "Best tile based on feature match: " << tiles_.getTilePath(*bestTile) << " with " << bestMatchCount << " good matches.\n";
+        #endif
     } else {
+        #ifdef DEBUG
         std::cerr << "[WARN] No tile produced valid feature matches.\n";
+        #endif
     }
 
     return bestTile;
@@ -331,7 +375,9 @@ std::optional<TileKey> MosaicBuilder::findBestMatchingTileInRadius(const cv::Mat
 
 std::optional<TileKey> MosaicBuilder::findClosestTile(double lat, double lon) {
     if (lat == 0.0 || lon == 0.0) {
+        #ifdef DEBUG
         std::cerr << "[WARN] Image has no valid GPS coordinates.\n";
+        #endif
         return std::nullopt;
     }
 
@@ -357,11 +403,15 @@ std::optional<TileKey> MosaicBuilder::findClosestTile(double lat, double lon) {
     }
 
     if (!bestKey) {
+        #ifdef DEBUG
         std::cerr << "[ERROR] No suitable tile found.\n";
+        #endif
         return std::nullopt;
     }
 
+    #ifdef DEBUG
     std::cout << "Tile candidate (GPS closest): " << tiles_.getTilePath(*bestKey) << '\n';
+    #endif
     return bestKey;
 }
 
@@ -416,7 +466,9 @@ bool MosaicBuilder::addImageToMosaic(const std::string& newImagePath) {
     cv::Rect localBounds;
     cv::Mat localMosaic = getMosaicAroundTile(bestKey, tileRadius, localBounds);
     if (localMosaic.empty()) {
+        #ifdef DEBUG
         std::cerr << "Failed to build local mosaic.\n";
+        #endif
         return false;
     }
     
@@ -426,14 +478,21 @@ bool MosaicBuilder::addImageToMosaic(const std::string& newImagePath) {
     cv::Mat H;
 
     if (!alignImages(newImageMatrix, mosaicMatrix, H)) return false;
+
+    #ifdef DEBUG
     std::cout << "H: \n" << H << "\n";
     std::cout << "det(H): " << cv::determinant(H) << "\n";
+    #endif
 
     H = H.inv();
+    #ifdef DEBUG
     std::cout << "det(H) inv: " << cv::determinant(H) << "\n";
+    #endif
 
     H = H / H.at<double>(2, 2);
+    #ifdef DEBUG
     std::cout << "det(H) norm: " << cv::determinant(H) << "\n";
+    #endif
     cv::Mat withOffset = tiles_.computeGlobalHomography(localOriginKey, H);
     
     tiles_.applyImage(newImagePath, withOffset, true);

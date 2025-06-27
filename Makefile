@@ -1,12 +1,13 @@
 CXX := g++
-CXXFLAGS := -std=c++17 -Wall -Wextra -O2
+CXXFLAGS := -std=c++17 -Wall -Wextra -O2 -DDEBUG
 PKGCONFIG := pkg-config
-LIBS := $(shell $(PKGCONFIG) --cflags --libs opencv4 gdal)
+LIBS := $(shell $(PKGCONFIG) --cflags --libs opencv4)
 
 SRC_DIR := src
 OBJ_DIR := obj
 BIN := mosaic
 TILES_DIR := tiles
+RES_IMG_DIR := results
 
 SRCS := $(wildcard $(SRC_DIR)/*.cpp)
 OBJS := $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(SRCS))
@@ -23,6 +24,6 @@ $(OBJ_DIR):
 	mkdir -p $(OBJ_DIR)
 
 clean:
-	rm -rf $(OBJ_DIR) $(BIN) $(TILES_DIR)
+	rm -rf $(OBJ_DIR) $(BIN) $(TILES_DIR) $(RES_IMG_DIR)
 
 .PHONY: all clean
