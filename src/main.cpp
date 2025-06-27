@@ -3,6 +3,9 @@
 #include <iostream>
 #include <string>
 
+constexpr int CROP_HEIGHT = 2048;
+constexpr int CROP_WIDTH = 2048;
+
 void add(const std::string imagePath, std::string outputDir, MosaicBuilder builder, int idx) {
     if (!builder.addImageToMosaic(imagePath)) {
         std::cout << "Image was not aligned.";
@@ -19,6 +22,18 @@ void add(const std::string imagePath, std::string outputDir, MosaicBuilder build
     std::cout << "Mosaic bounds: " << bounds << "\n";
     cv::imwrite(res, mosaic);
     std::cout << "Saved reconstructed mosaic to: " << res << "\n";
+
+    // test cropping by size
+    cv::Rect boundsCropped;
+    cv::Mat mosaicCropped = builder.mosaicFromTiles(outputDir, boundsCropped, CROP_WIDTH, CROP_HEIGHT, OffsetOrigin::CENTER);
+    if (mosaicCropped.empty()) {
+        std::cerr << "Failed to reconstruct mosaic.\n";
+        exit(1);
+    }
+    std::string resCropped = "result_cropped_" + std::to_string(idx) + ".png";
+    std::cout << "Cropped mosaic bounds: " << boundsCropped << "\n";
+    cv::imwrite(resCropped, mosaicCropped);
+    std::cout << "Saved reconstructed cropped mosaic to: " << resCropped << "\n";
 }
 
 void buildMosaic(const std::string refImage, const std::string targetImage, const std::string outputDir) {

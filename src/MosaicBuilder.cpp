@@ -147,7 +147,88 @@ cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mos
     return mosaic;
 }
 
-// TODO: add mosaicFromTiles by image size and offset (e.g, "TOP_RIGHT")
+// Mosaic from tiles: understandable mosaic (height x width, px) cropping
+cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mosaicBounds, int mosaicWidth, int mosaicHeight, OffsetOrigin offset) {
+    std::map<std::pair<int, int>, std::string> tileMap;
+    int minX = INT_MAX, minY = INT_MAX, maxX = INT_MIN, maxY = INT_MIN;
+
+    for (const auto& entry : fs::directory_iterator(tileDir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string filename = entry.path().filename().string();
+        std::smatch match;
+        if (std::regex_match(filename, match, TILE_REGEX)) {
+            int ty = std::stoi(match[1]);
+            int tx = std::stoi(match[2]);
+            tileMap[{tx, ty}] = entry.path().string();
+
+            minX = std::min(minX, tx);
+            minY = std::min(minY, ty);
+            maxX = std::max(maxX, tx);
+            maxY = std::max(maxY, ty);
+        }
+    }
+
+    if (tileMap.empty()) {
+        std::cerr << "No tiles found in: " << tileDir << "\n";
+        return {};
+    }
+
+    int totalTilesX = maxX - minX + 1;
+    int totalTilesY = maxY - minY + 1;
+    int tilesInWidth = std::min(totalTilesX, (mosaicWidth + TILE_SIZE - 1) / TILE_SIZE);
+    int tilesInHeight = std::min(totalTilesY, (mosaicHeight + TILE_SIZE - 1) / TILE_SIZE);
+
+    int startTileX, startTileY;
+    switch (offset) {
+        case OffsetOrigin::TOP_LEFT:
+            startTileX = minX;
+            startTileY = minY;
+            break;
+        case OffsetOrigin::TOP_RIGHT:
+            startTileX = maxX - tilesInWidth + 1;
+            startTileY = minY;
+            break;
+        case OffsetOrigin::BOTTOM_LEFT:
+            startTileX = minX;
+            startTileY = maxY - tilesInHeight + 1;
+            break;
+        case OffsetOrigin::BOTTOM_RIGHT:
+            startTileX = maxX - tilesInWidth + 1;
+            startTileY = maxY - tilesInHeight + 1;
+            break;
+        case OffsetOrigin::CENTER:
+            startTileX = minX + (totalTilesX - tilesInWidth) / 2;
+            startTileY = minY + (totalTilesY - tilesInHeight) / 2;
+            break;
+        default:
+            throw std::runtime_error("Unsupported offset origin.");
+    }
+
+    cv::Mat mosaic(tilesInHeight * TILE_SIZE, tilesInWidth * TILE_SIZE, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+
+    for (int y = 0; y < tilesInHeight; ++y) {
+        for (int x = 0; x < tilesInWidth; ++x) {
+            int tx = startTileX + x;
+            int ty = startTileY + y;
+            auto it = tileMap.find({tx, ty});
+            if (it == tileMap.end()) continue;
+
+            cv::Mat tile = cv::imread(it->second, cv::IMREAD_UNCHANGED);
+            if (tile.empty()) {
+                std::cerr << "Failed to read tile: " << it->second << "\n";
+                continue;
+            }
+
+            int dx = x * TILE_SIZE;
+            int dy = y * TILE_SIZE;
+            tile.copyTo(mosaic(cv::Rect(dx, dy, TILE_SIZE, TILE_SIZE)));
+        }
+    }
+
+    mosaicBounds = cv::Rect(startTileX * TILE_SIZE, startTileY * TILE_SIZE, tilesInWidth * TILE_SIZE, tilesInHeight * TILE_SIZE);
+
+    return mosaic;
+}
 
 bool MosaicBuilder::isValidTile(std::string tilePath) {
     cv::Mat img = cv::imread(tilePath, cv::IMREAD_UNCHANGED);

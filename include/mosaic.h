@@ -16,6 +16,14 @@ constexpr double R_M = 6371000.0; // Earth radius in meters
 
 const std::regex TILE_REGEX(R"(tile_(\-?\d+)\_(\-?\d+)\.png)"); // searches for pattern "tile_y_x.png"
 
+enum class OffsetOrigin {
+    TOP_LEFT,
+    TOP_RIGHT,
+    BOTTOM_LEFT,
+    BOTTOM_RIGHT,
+    CENTER
+};
+
 struct TileKey {
     int x, y;
     
@@ -71,7 +79,7 @@ public:
 
     cv::Mat mosaicFromTiles(const std::string& tileDir, cv::Rect& mosaicBounds);
     cv::Mat mosaicFromTiles(const std::string& tileDir, cv::Rect& mosaicBounds, int startX, int startY, int endX, int endY);
-
+    cv::Mat mosaicFromTiles(const std::string& tileDir, cv::Rect& mosaicBounds, int mosaicWidth, int mosaicHeight, OffsetOrigin offset);
 private:
     ImageMatrix ref_;
     ImageMatrix target_;
