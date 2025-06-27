@@ -151,6 +151,19 @@ bool ExifToolPipe::setExifTag(const std::string& imagePath, const std::string& a
            response.find("image files created") != std::string::npos;
 }
 
+bool ExifToolPipe::setExifTags(const std::string& imagePath, const std::map<std::string, std::string>& tags) {
+    std::ostringstream cmd;
+    for (const auto& [tag, value] : tags) {
+        cmd << "-" << tag << "=" << value << "\n";
+    }
+    cmd << imagePath << "\n-overwrite_original_in_place";
+
+    if (!sendCommand(cmd.str())) return false;
+
+    std::string response = readResponse();
+    return response.find("image files updated") != std::string::npos || response.find("image files created") != std::string::npos;
+}
+
 bool ExifToolPipe::hasExifTag(const std::string& imagePath, const std::string& tag) {
     std::ostringstream cmd;
     cmd << "-" << tag << "\n" << imagePath;
@@ -160,7 +173,7 @@ bool ExifToolPipe::hasExifTag(const std::string& imagePath, const std::string& t
     return data.find(tag) != data.end();
 }
 
-std::string ExifToolPipe::inExifTag(const std::string& imagePath, const std::string& tag) {
+std::string ExifToolPipe::getExifTag(const std::string& imagePath, const std::string& tag) {
     std::ostringstream cmd;
     cmd << "-" << tag << "\n" << imagePath;
     //std::cout << "[DEBUG]: Running " << "-" << tag << "\n" << imagePath << '\n'; 
@@ -169,4 +182,49 @@ std::string ExifToolPipe::inExifTag(const std::string& imagePath, const std::str
     auto data = getLastExifData();
     auto it = data.find(tag);
     return (it != data.end()) ? it->second : "";
+}
+
+std::map<std::string, std::string> ExifToolPipe::getExifTags(const std::string& imagePath, const std::vector<std::string>& tags) {
+    std::ostringstream cmd;
+    for (const auto& tag : tags) {
+        cmd << "-" << tag << "\n";
+    }
+    cmd << imagePath;
+
+    if (!sendCommand(cmd.str())) return {};
+
+    return getLastExifData();
+}
+
+bool ExifToolPipe::setExifTagsBatch(const std::vector<std::string>& imagePaths, const std::map<std::string, std::string>& tags) {
+    if (imagePaths.empty() || tags.empty()) return false;
+
+    std::ostringstream cmd;
+    for (const auto& [tag, value] : tags) {
+        cmd << "-" << tag << "=" << value << "\n";
+    }
+
+    for (const auto& path : imagePaths) {
+        cmd << path << "\n";
+    }
+
+    cmd << "-overwrite_original_in_place";
+
+    if (!sendCommand(cmd.str())) return false;
+
+    std::string response = readResponse();
+    return response.find("image files updated") != std::string::npos ||
+           response.find("image files created") != std::string::npos;
+}
+
+std::map<std::string, double> ExifToolPipe::parseExifValuesToNumbers(const std::map<std::string, std::string>& tagMap) const {
+    std::map<std::string, double> result;
+
+    for (const auto& [key, value] : tagMap) {
+        try {
+            result[key] = parseExifNumber(value);
+        } catch (const std::exception& e) {}
+    }
+
+    return result;
 }

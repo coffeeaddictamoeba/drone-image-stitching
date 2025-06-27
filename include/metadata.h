@@ -1,5 +1,6 @@
 #pragma once
 
+#include <vector>
 #ifndef METADATA_H
 #define METADATA_H
 
@@ -28,10 +29,14 @@ public:
     ExifToolPipe& operator=(ExifToolPipe&& other) noexcept;
 
     bool setExifTag(const std::string& imagePath, const std::string& args);
+    bool setExifTags(const std::string& imagePath, const std::map<std::string, std::string>& tags);
+    bool setExifTagsBatch(const std::vector<std::string>& imagePaths, const std::map<std::string, std::string>& tags);
     bool hasExifTag(const std::string& imagePath, const std::string& tag);
-    std::string inExifTag(const std::string& imagePath, const std::string& tag);
+    std::string getExifTag(const std::string& imagePath, const std::string& tag);
+    std::map<std::string, std::string> getExifTags(const std::string& imagePath, const std::vector<std::string>& tags);
 
     double parseExifNumber(const std::string& value) const;
+    std::map<std::string, double> parseExifValuesToNumbers(const std::map<std::string, std::string>& tagMap) const;
     double parseExifGPS(const std::string& value) const;
 
 private:

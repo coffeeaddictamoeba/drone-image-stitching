@@ -5,6 +5,7 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#include <unordered_map>
 
 namespace fs = std::filesystem;
 
@@ -24,25 +25,23 @@ std::string TileManager::getTilePath(const TileKey& key) const {
     return outputDirectory_ + "/tile_" + std::to_string(key.y) + "_" + std::to_string(key.x) + ".png";
 }
 
+// unused for now
 double TileManager::estimateGSD(const std::string& imagePath) const {
     // Constants for Pi Camera V2
     const double sensorWidth = 3.674; // mm
 
-    std::string altitudeStr = exiftool_.inExifTag(imagePath, IMG_GPS_ALT);
-    std::string focalStr = exiftool_.inExifTag(imagePath, IMG_FOCAL_LEN_TAG);
-    std::string widthStr = exiftool_.inExifTag(imagePath, IMG_WIDTH_TAG);
+    std::vector<std::string> tags = {IMG_GPS_ALT, IMG_FOCAL_LEN_TAG, IMG_WIDTH_TAG};
+    auto rawTags = exiftool_.getExifTags(imagePath, tags);
+    auto numericTags = exiftool_.parseExifValuesToNumbers(rawTags);
 
-    if (altitudeStr.empty() || focalStr.empty() || widthStr.empty()) {
-        throw std::runtime_error("Missing required EXIF tags for GSD computation.");
-    }
-
-    double altitude = exiftool_.parseExifNumber(altitudeStr); // meters
-    double focalLength = exiftool_.parseExifNumber(focalStr); // mm
-    int imageWidth = std::stoi(widthStr);                       // px
+    double altitude = numericTags.at(IMG_GPS_ALT);           // meters
+    double focalLength = numericTags.at(IMG_FOCAL_LEN_TAG);  // mm
+    double imageWidth = numericTags.at(IMG_WIDTH_TAG);       // px                       
 
     if (focalLength <= 0 || imageWidth <= 0) {
         throw std::runtime_error("Invalid focal length or image width for GSD computation.");
     }
+
     return (sensorWidth * altitude) / (focalLength * imageWidth); // m/px
 }
 
@@ -81,13 +80,11 @@ void TileManager::assignMetadata(const std::string imagePath, const double lat, 
     exiftool_.setExifTag(imagePath, tagStream.str());
 }
 
-void TileManager::saveTile(const TileKey& key, const cv::Mat& tile, const double lat, const double lon, const std::string imagePath) const {
+void TileManager::saveTile(const TileKey& key, const cv::Mat& tile, const double lat, const double lon, const std::map<std::string, double>& exif) const {
     std::string path = getTilePath(key);
     cv::imwrite(path, tile);
-    
-    double alt = exiftool_.parseExifNumber(exiftool_.inExifTag(imagePath, "GPSAltitude"));
-    double flen = exiftool_.parseExifNumber(exiftool_.inExifTag(imagePath, "FocalLength"));
-    assignMetadata(path, lat, lon, alt, flen);
+
+    assignMetadata(path, lat, lon, exif.at(IMG_GPS_LAT), exif.at(IMG_FOCAL_LEN_TAG));
 }
 
 cv::Mat TileManager::warpTileRegion(const cv::Mat& input, const cv::Mat& H, const cv::Rect& tileRect) const {
@@ -139,20 +136,7 @@ cv::Mat TileManager::computeGlobalHomography(const TileKey& localOriginKey, cons
     return offsetMat * localHomography;
 }
 
-void TileManager::applyImageWarpOnce(const std::string& imagePath, const cv::Mat& homography) {
-    auto lat = exiftool_.parseExifGPS(exiftool_.inExifTag(imagePath, IMG_GPS_LAT));
-    auto lon = exiftool_.parseExifGPS(exiftool_.inExifTag(imagePath, IMG_GPS_LON));
-    double gsd = estimateGSD(imagePath);
-
-    cv::Mat img = cv::imread(imagePath, cv::IMREAD_UNCHANGED);
-    if (img.empty()) {
-        std::cerr << "Failed to load image: " << imagePath << "\n";
-        return;
-    }
-    if (img.channels() == 3) {
-        cv::cvtColor(img, img, cv::COLOR_BGR2BGRA);
-    }
-
+void TileManager::applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homography, double lat, double lon, double gsd, std::map<std::string, double> exif) {
     std::vector<cv::Point2f> corners = {
         {0, 0},
         {(float)img.cols, 0},
@@ -204,34 +188,20 @@ void TileManager::applyImageWarpOnce(const std::string& imagePath, const cv::Mat
             }
 
             cv::Mat patch = warpCanvas(localTileRect);
-            for (int y = 0; y < TILE_SIZE; ++y) {
-                for (int x = 0; x < TILE_SIZE; ++x) {
-                    cv::Vec4b p = patch.at<cv::Vec4b>(y, x);
-                    if (p[3]) {
-                        tile.at<cv::Vec4b>(y, x) = p;
-                    }
-                }
-            }
+            cv::Mat mask;
+            // SIMD instead of loop
+            std::vector<cv::Mat> channels;
+            cv::split(patch, channels);
+            mask = channels[3] > 0;
+            patch.copyTo(tile, mask);
 
             auto [tileLat, tileLon] = calculateTileGPS(key, centerKey, lat, lon, gsd);
-            saveTile(key, tile, tileLat, tileLon, imagePath);
+            saveTile(key, tile, tileLat, tileLon, exif);
         }
     }
 }
 
-void TileManager::applyImagePerTile(const std::string& imagePath, const cv::Mat& homography) {
-    auto lat = exiftool_.parseExifGPS(exiftool_.inExifTag(imagePath, IMG_GPS_LAT));
-    auto lon = exiftool_.parseExifGPS(exiftool_.inExifTag(imagePath, IMG_GPS_LON));
-
-    cv::Mat img = cv::imread(imagePath, cv::IMREAD_UNCHANGED);
-    if (img.empty()) {
-        std::cerr << "Failed to load image: " << imagePath << "\n";
-        return;
-    }
-    if (img.channels() == 3) {
-        cv::cvtColor(img, img, cv::COLOR_BGR2BGRA);
-    }
-
+void TileManager::applyImagePerTile(const cv::Mat& img, const cv::Mat& homography, double lat, double lon, double gsd, std::map<std::string, double> exif) {
     std::vector<cv::Point2f> corners = {
         {0, 0},
         {(float)img.cols, 0},
@@ -252,7 +222,6 @@ void TileManager::applyImagePerTile(const std::string& imagePath, const cv::Mat&
     int tx1 = std::floor(maxX / TILE_SIZE), ty1 = std::floor(maxY / TILE_SIZE);
 
     TileKey centerKey{ (tx0 + tx1) / 2, (ty0 + ty1) / 2 };
-    double gsd = estimateGSD(imagePath);
 
     for (int ty = ty0; ty <= ty1; ++ty) {
         for (int tx = tx0; tx <= tx1; ++tx) {
@@ -265,30 +234,50 @@ void TileManager::applyImagePerTile(const std::string& imagePath, const cv::Mat&
 
             bool tileModified = false;
 
-            for (int y = 0; y < TILE_SIZE; ++y) {
-                for (int x = 0; x < TILE_SIZE; ++x) {
-                    const cv::Vec4b& srcPixel = patch.at<cv::Vec4b>(y, x);
-                    cv::Vec4b& dstPixel = tile.at<cv::Vec4b>(y, x);
+            cv::Mat diff;
+            cv::compare(patch, tile, diff, cv::CMP_NE);
 
-                    if (srcPixel != dstPixel) {
-                        dstPixel = srcPixel;
-                        tileModified = true;
-                    }
-                }
+            if (cv::countNonZero(diff.reshape(1)) > 0) {
+                patch.copyTo(tile);
+                tileModified = true;
             }
 
             if (tileModified) {
                 auto [tileLat, tileLon] = calculateTileGPS(key, centerKey, lat, lon, gsd);
-                saveTile(key, tile, tileLat, tileLon, imagePath);
+                saveTile(key, tile, tileLat, tileLon, exif);
             }
         }
     }
 }
 
 void TileManager::applyImage(const std::string& imagePath, const cv::Mat& homography, bool warpOnce) {
+    std::vector<std::string> sharedTags = {IMG_GPS_LAT, IMG_GPS_LON, IMG_GPS_ALT, IMG_FOCAL_LEN_TAG, IMG_WIDTH_TAG};
+
+    auto rawExif = exiftool_.getExifTags(imagePath, sharedTags);
+    auto exif = exiftool_.parseExifValuesToNumbers(rawExif);
+
+    // std::cout << "EXIF values:\n";
+    // for (const auto& [key, value] : exif) {
+    //     std::cout << key << ": " << value << "\n";
+    // }
+
+    double lat = exiftool_.parseExifGPS(rawExif.at(IMG_GPS_LAT));
+    double lon = exiftool_.parseExifGPS(rawExif.at(IMG_GPS_LON));
+
+    double gsd = (3.674 * exif.at(IMG_GPS_ALT)) / (exif.at(IMG_FOCAL_LEN_TAG) * exif.at(IMG_WIDTH_TAG));
+
+    cv::Mat img = cv::imread(imagePath, cv::IMREAD_UNCHANGED);
+    if (img.empty()) {
+        std::cerr << "Failed to load image: " << imagePath << "\n";
+        return;
+    }
+    if (img.channels() == 3) {
+        cv::cvtColor(img, img, cv::COLOR_BGR2BGRA);
+    }
+
     if (warpOnce) {
-        applyImageWarpOnce(imagePath, homography);
+        applyImageWarpOnce(img, homography, lat, lon, gsd, exif);
     } else {
-        applyImagePerTile(imagePath, homography);
+        applyImagePerTile(img, homography, lat, lon, gsd, exif);
     }
 }

@@ -6,6 +6,7 @@
 #include <string>
 #include <opencv4/opencv2/opencv.hpp>
 #include <filesystem>
+#include <unordered_map>
 #include "metadata.h"
 #include "fmatch.h"
 
@@ -43,7 +44,7 @@ public:
     std::string getTilePath(const TileKey& key) const;
 
     cv::Mat loadTile(const TileKey& key) const;
-    void saveTile(const TileKey& key, const cv::Mat& tile, double lat, double lon, const std::string imagePath) const;
+    void saveTile(const TileKey& key, const cv::Mat& tile, double lat, double lon, const std::map<std::string, double>& exif) const;
 
     TileKey getTileKeyForPoint(int x, int y) const;
     cv::Mat computeGlobalHomography(const TileKey& localOriginKey, const cv::Mat& localHomography);
@@ -57,8 +58,8 @@ public:
 private:
     void blendOntoTile(cv::Mat& tile, const cv::Mat& patch, const cv::Rect& roi);
     cv::Mat warpTileRegion(const cv::Mat& input, const cv::Mat& H, const cv::Rect& tileRect) const;
-    void applyImagePerTile(const std::string& imagePath, const cv::Mat& homography);
-    void applyImageWarpOnce(const std::string& imagePath, const cv::Mat& homography);
+    void applyImagePerTile(const cv::Mat& img, const cv::Mat& homography, double lat, double lon, double gsd, std::map<std::string, double> exif);
+    void applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homography, double lat, double lon, double gsd, std::map<std::string, double> exif);
 
     std::string outputDirectory_;
     ExifToolPipe& exiftool_;
@@ -90,7 +91,7 @@ private:
 
     bool isValidTile(std::string tilePath);
     double findTileDistance(std::string tilePath, double latToCompare, double lonToCompare);
-    std::optional<TileKey> findClosestTile(const std::string& imagePath);
+    std::optional<TileKey> findClosestTile(double lat, double lon);
     cv::Mat getMosaicAroundTile(TileKey center, int radius, cv::Rect& outBounds);
     std::optional<TileKey> findBestMatchingTileInRadius(const cv::Mat& image, const TileKey& centerTile, int radius);
 };
