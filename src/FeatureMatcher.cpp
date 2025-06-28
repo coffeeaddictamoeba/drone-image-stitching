@@ -86,7 +86,7 @@ bool FeatureMatcher::computeHomography(const ImageMatrix src, const ImageMatrix 
     cv::Mat affine = cv::estimateAffinePartial2D(pts2, pts1, inlierMask, cv::RANSAC, 3.0);
 
     auto inliers = cv::countNonZero(inlierMask);
-    if (inliers < 100) {
+    if (inliers < 100 && (inliers < 70 && goodMatches.size() < 1500)) { // acceptable??
         #ifdef DEBUG
         std::cerr << "[ERROR] Too few inliers after affine estimation (" << inliers << "). Skipping this image (" << dstPath << ").\n";
         #endif

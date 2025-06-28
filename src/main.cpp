@@ -1,118 +1,171 @@
 #include "../include/mosaic.h"
 #include "../include/metadata.h"
+#include <bits/types/timer_t.h>
+#include <ctime>
+#include <future>
 #include <iostream>
 #include <string>
+#include <filesystem>
 
-constexpr int CROP_HEIGHT = 2048;
-constexpr int CROP_WIDTH = 2048;
+namespace fs = std::filesystem;
 
-void add(const std::string imagePath, std::string outputDir, MosaicBuilder builder, int idx) {
-    if (!builder.addImageToMosaic(imagePath)) {
-        std::cout << "Image was not aligned.";
-    }
+constexpr int CROP_HEIGHT = 8192;
+constexpr int CROP_WIDTH = 8192;
+const std::string resultDir = "results";
+const std::string tilesDir = "tiles";
 
-    cv::Rect bounds;
-    cv::Mat mosaic = builder.mosaicFromTiles(outputDir, bounds);
-    if (mosaic.empty()) {
-        std::cerr << "Failed to reconstruct mosaic.\n";
-        exit(1);
-    }
+// need to think about better alternative than just creating new mosaics when images do not align
+// AND FIX THE INITIAL ALIGN IMG TRANSPARENCY BUG
 
-    std::string res = "result_" + std::to_string(idx) + ".png";
-    std::cout << "Mosaic bounds: " << bounds << "\n";
-    cv::imwrite(res, mosaic);
-    std::cout << "Saved reconstructed mosaic to: " << res << "\n";
+std::string makeMosaicDir(const std::string& baseDir, int idx) {
+    std::string dir = baseDir + "/" + baseDir + "_" + std::to_string(idx);
+    if (!fs::exists(dir)) fs::create_directory(dir);
+    return dir;
+}
 
-    // test cropping by size
+void saveTilesAsMosaic(std::string outputDir, MosaicBuilder builder, int idx) {
+    time_t timer;
     cv::Rect boundsCropped;
     cv::Mat mosaicCropped = builder.mosaicFromTiles(outputDir, boundsCropped, CROP_WIDTH, CROP_HEIGHT, OffsetOrigin::CENTER);
     if (mosaicCropped.empty()) {
         std::cerr << "Failed to reconstruct mosaic.\n";
         exit(1);
     }
-    std::string resCropped = "result_cropped_" + std::to_string(idx) + ".png";
+
+    if (!fs::exists(resultDir)) fs::create_directory(resultDir);
+
+    std::string resCropped = resultDir + "/result_cropped_" + std::to_string(idx) + "_" + std::to_string(std::time(&timer)) + ".png";
     std::cout << "Cropped mosaic bounds: " << boundsCropped << "\n";
     cv::imwrite(resCropped, mosaicCropped);
     std::cout << "Saved reconstructed cropped mosaic to: " << resCropped << "\n";
 }
 
-void buildMosaic(const std::string refImage, const std::string targetImage, const std::string outputDir) {
-    try {
-        ExifToolPipe exiftool;
-        TileManager tileManager(outputDir, exiftool);
-        MosaicBuilder builder(exiftool, tileManager);
-
-        if (!builder.stitchToTiles(refImage, targetImage)) {
-            std::cerr << "Mosaic stitching failed.\n";
-            return exit(1);
+std::vector<std::string> findAllMosaics(const std::string& baseDir) {
+    std::vector<std::string> mosaicDirs;
+    for (const auto& entry : fs::directory_iterator(baseDir)) {
+        if (entry.is_directory()) {
+            mosaicDirs.push_back(entry.path().string());
         }
+    }
+    std::sort(mosaicDirs.begin(), mosaicDirs.end());
+    return mosaicDirs;
+}
 
-        std::cout << "Mosaic stitching completed successfully.\n";
+// questionable but ok for now
+bool addToMosaics(const std::string& imagePath, const std::vector<std::string>& mosaicDirs, ExifToolPipe& exiftool, int& imageIdx) {
+    std::atomic<bool> found(false);
+    std::promise<std::tuple<std::string, std::unique_ptr<MosaicBuilder>>> promise;
 
-        cv::Rect bounds;
-        cv::Mat mosaic = builder.mosaicFromTiles(outputDir, bounds);
-        if (mosaic.empty()) {
-            std::cerr << "Failed to reconstruct mosaic.\n";
-            exit(1);
+    for (const auto& dir : mosaicDirs) {
+        std::async(std::launch::async, [&, dir]() {
+            if (found.load()) return;
+
+            TileManager tileManager(dir, exiftool);
+            auto builder = std::make_unique<MosaicBuilder>(exiftool, tileManager);
+            if (builder->addImageToMosaic(imagePath)) {
+                if (!found.exchange(true)) {
+                    promise.set_value({dir, std::move(builder)});
+                }
+            }
+        });
+    }
+
+    auto future = promise.get_future();
+    if (future.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+        auto [dir, builder] = future.get();
+        saveTilesAsMosaic(dir, *builder, imageIdx++);
+        return true;
+    }
+
+    return false;
+}
+
+void useExistingMosaic(const std::string& baseOutputDir, ExifToolPipe& exiftool) {
+    auto mosaicDirs = findAllMosaics(baseOutputDir);
+    if (mosaicDirs.empty()) {
+        std::cerr << "No mosaics found in: " << baseOutputDir << "\n";
+        return;
+    }
+
+    int imageIdx = 0;
+    std::string queued1, queued2;
+
+    while (true) {
+        std::string newImagePath;
+        std::cout << "Enter path to an image to add (or blank to quit): ";
+        std::getline(std::cin, newImagePath);
+        if (newImagePath.empty()) break;
+
+        if (addToMosaics(newImagePath, mosaicDirs, exiftool, imageIdx)) continue;
+
+        std::cout << "Image did not fit any mosaic.\n";
+        if (queued1.empty()) {
+            queued1 = newImagePath;
+            std::cout << "Queued image for next mosaic: " << queued1 << "\n";
+        } else {
+            queued2 = newImagePath;
+
+            if (mosaicDirs.size() >= 4) {
+                std::cerr << "Maximum number of mosaics reached.\n";
+                queued1.clear();
+                queued2.clear();
+                continue;
+            }
+
+            int newIdx = mosaicDirs.size();
+            std::string newDir = makeMosaicDir(baseOutputDir, newIdx);
+            TileManager newTileManager(newDir, exiftool);
+            MosaicBuilder newBuilder(exiftool, newTileManager);
+
+            if (!newBuilder.stitchToTiles(queued1, queued2)) {
+                std::cerr << "Failed to create new mosaic with queued images.\n";
+                queued1.clear();
+                queued2.clear();
+                continue;
+            }
+
+            std::cout << "Created new mosaic: " << newDir << "\n";
+            saveTilesAsMosaic(newDir, newBuilder, imageIdx++);
+            mosaicDirs.push_back(newDir);
+
+            queued1.clear();
+            queued2.clear();
         }
-
-        std::cout << "Mosaic bounds: " << bounds << "\n";
-        cv::imwrite("result.png", mosaic);
-        std::cout << "Saved reconstructed mosaic to: " << "result.png" << "\n";
-        int idx = 0;
-
-        while (true) {
-            std::string newImagePath = "";
-            std::cout << "Enter a path to an image you want to add: ";
-            std::cin >> newImagePath;
-
-            add(newImagePath, outputDir, builder, idx);
-            idx++;
-        }
-
-    } catch (const std::exception& ex) {
-        std::cerr << "Error: " << ex.what() << "\n";
-        exit(1);
     }
 }
 
-void useReadyMosaic(const std::string outputDir) {
-    try {
-        ExifToolPipe exiftool;
-        TileManager tileManager(outputDir, exiftool);
-        MosaicBuilder builder(exiftool, tileManager);
+void startNewMosaic(const std::string& refImage, const std::string& targetImage, const std::string& baseOutputDir, ExifToolPipe& exiftool) {
+    std::string mosaicDir = makeMosaicDir(baseOutputDir, 0);
+    TileManager tileManager(mosaicDir, exiftool);
+    MosaicBuilder builder(exiftool, tileManager);
 
-        int idx = 0;
-        while (true) {
-            std::string newImagePath = "";
-            std::cout << "Enter a path to an image you want to add: ";
-            std::cin >> newImagePath;
-    
-            add(newImagePath, outputDir, builder, idx);
-            idx++;
-        }
-    } catch (const std::exception& ex) {
-        std::cerr << "Error: " << ex.what() << "\n";
+    if (!builder.stitchToTiles(refImage, targetImage)) {
+        std::cerr << "Initial mosaic stitching failed.\n";
         exit(1);
     }
-    
+
+    std::cout << "Mosaic stitching completed successfully in " << mosaicDir << ".\n";
+    saveTilesAsMosaic(mosaicDir, builder, 0);
 }
 
-// for testing purposes the mosaic from tiles is saved in a full size. In prod it is better to limit its size
 int main(int argc, char** argv) {
-    if (argc == 4) {
+    if (argc == 3) {
         std::string refImage = argv[1];
         std::string targetImage = argv[2];
-        std::string outputDir = argv[3];
-        std::cout << "Building new mosaic...\n";
-        buildMosaic(refImage, targetImage, outputDir); // in future this can be used in case image does not match the existing mosaic not to lose the data
+
+        if (!fs::exists(tilesDir)) fs::create_directory(tilesDir);
+
+        ExifToolPipe exiftool;
+        startNewMosaic(refImage, targetImage, tilesDir, exiftool);
+        useExistingMosaic(tilesDir, exiftool);
         return 0;
-    } else if (argc == 2) {
-        std::string outputDir = argv[1];
-        useReadyMosaic(outputDir);
+    } else if (argc == 1) {
+        ExifToolPipe exiftool;
+        useExistingMosaic(tilesDir, exiftool);
         return 0;
     } else {
-        std::cerr << "Usage: " << argv[0] << " <ref_image> <target_image> <output_dir> <exiftool_path>\n";
+        std::cerr << "Usage:\n"
+                  << argv[0] << " <ref_image> <target_image>\n";
         return 1;
     }
 }
