@@ -1,5 +1,6 @@
 #pragma once
 
+#include <climits>
 #include <cmath>
 #include <optional>
 #include <regex>
@@ -15,7 +16,9 @@ constexpr double M_PER_DEGREE_LATITUDE = 111320.0;
 constexpr double DEG_TO_RAD = M_PI / 180.0;
 constexpr double R_M = 6371000.0; // Earth radius in meters
 
-const std::regex TILE_REGEX(R"(tile_(\-?\d+)\_(\-?\d+)\.png)"); // searches for pattern "tile_y_x.png"
+inline const std::regex TILE_REGEX(R"(tile_(\-?\d+)\_(\-?\d+)\.png)"); // searches for pattern "tile_y_x.png"
+
+const std::string COORDS_METADATA = "coords_metadata.txt";
 
 enum class OffsetOrigin {
     TOP_LEFT,
@@ -43,6 +46,9 @@ public:
     std::string getOutputDirectory() const;
     std::string getTilePath(const TileKey& key) const;
 
+    void loadGlobalMetadata();
+    void saveGlobalMetadata() const;
+
     cv::Mat loadTile(const TileKey& key) const;
     void saveTile(const TileKey& key, const cv::Mat& tile, double lat, double lon, const std::map<std::string, double>& exif) const;
 
@@ -63,6 +69,13 @@ private:
 
     std::string outputDirectory_;
     ExifToolPipe& exiftool_;
+
+    // globals for knowing the center for offset calculation
+    int globalMinX_ = 0, globalMinY_ = 0;
+    int globalMaxX_ = 0, globalMaxY_ = 0;
+
+    TileKey getGlobalCenterTileKey() const;
+    void updateGlobalBounds(const TileKey& key);
 };
 
 
@@ -89,7 +102,7 @@ private:
     TileManager& tiles_;
     cv::Mat homography_;
 
-    bool isValidTile(std::string tilePath);
+    bool isValidTile(const std::string tilePath, cv::Mat& tileMat);
     double findTileDistance(std::string tilePath, double latToCompare, double lonToCompare);
     std::optional<TileKey> findClosestTile(double lat, double lon);
     cv::Mat getMosaicAroundTile(TileKey center, int radius, cv::Rect& outBounds);

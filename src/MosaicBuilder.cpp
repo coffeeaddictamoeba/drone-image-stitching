@@ -264,19 +264,24 @@ cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mos
     return mosaic;
 }
 
-bool MosaicBuilder::isValidTile(std::string tilePath) {
-    cv::Mat img = cv::imread(tilePath, cv::IMREAD_UNCHANGED);
-    if (img.empty()) {
-        std::cout << "Failed to load image: " << tilePath << "\n";
-        return false;
-    }
+// not sure (was part of transparency bug fix)
+bool MosaicBuilder::isValidTile(const std::string tilePath, cv::Mat& tileMat) {
+    const int channels = tileMat.channels();
 
-    if (img.channels() == 4) {
-        std::vector<cv::Mat> channels;
-        cv::split(img, channels);
-        double minAlpha, maxAlpha;
-        cv::minMaxLoc(channels[3], &minAlpha, &maxAlpha);
-        if (maxAlpha < 1) {
+    if (channels == 4) {
+        const uchar* pixel = tileMat.ptr<uchar>(0);
+        const size_t totalPixels = tileMat.total();
+        bool hasVisiblePixel = false;
+
+        for (size_t i = 0; i < totalPixels; ++i) {
+            uchar alpha = pixel[i * 4 + 3];
+            if (alpha > 0) {
+                hasVisiblePixel = true;
+                break;
+            }
+        }
+
+        if (!hasVisiblePixel) {
             #ifdef DEBUG
             std::cout << "Skipping fully transparent tile: " << tilePath << "\n";
             #endif
@@ -284,14 +289,17 @@ bool MosaicBuilder::isValidTile(std::string tilePath) {
         }
     }
 
-    cv::Mat gray;
-    if (img.channels() == 4 || img.channels() == 3)
-        cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
-    else
-        gray = img;
+    double minVal = 0, maxVal = 0;
 
-    double minVal, maxVal;
-    cv::minMaxLoc(gray, &minVal, &maxVal);
+    if (channels == 1) {
+        cv::minMaxLoc(tileMat, &minVal, &maxVal);
+    } else if (channels >= 3) {
+        std::vector<cv::Mat> ch;
+        cv::split(tileMat, ch);
+        cv::Mat intensity = 0.299 * ch[2] + 0.587 * ch[1] + 0.114 * ch[0]; // avoid cvtColor
+        cv::minMaxLoc(intensity, &minVal, &maxVal);
+    }
+
     if (std::abs(maxVal - minVal) < 1e-3) {
         #ifdef DEBUG
         std::cout << "Skipping visually uniform tile: " << tilePath << "\n";
@@ -318,6 +326,7 @@ double MosaicBuilder::findTileDistance(std::string tilePath, double latToCompare
     return R_M * c; // distance in meters
 }
 
+// OBSOLETE
 // function for searching best tile for feature matching. works well but quite unnecessary for now
 std::optional<TileKey> MosaicBuilder::findBestMatchingTileInRadius(const cv::Mat& image, const TileKey& centerTile, int radius) {
     const int maxThreads = 3; // test with other amounts
@@ -331,7 +340,7 @@ std::optional<TileKey> MosaicBuilder::findBestMatchingTileInRadius(const cv::Mat
             std::cout << "Evaluating tile " << tilePath << '\n';
             #endif
 
-            if (!fs::exists(tilePath) || !isValidTile(tilePath)) continue;
+            //if (!fs::exists(tilePath) || !isValidTile(tilePath)) continue;
 
             futures.emplace_back(std::async(std::launch::async, [=]() -> std::pair<TileKey, int> {
                 FeatureMatcher matcher{exiftool_, "SIFT"};
@@ -393,7 +402,8 @@ std::optional<TileKey> MosaicBuilder::findClosestTile(double lat, double lon) {
         int tx = std::stoi(match[2]);
         std::string tilePath = entry.path().string();
 
-        if (!isValidTile(tilePath)) continue;
+        cv::Mat tileMat = cv::imread(tilePath, cv::IMREAD_UNCHANGED);
+        if (tileMat.empty() || !isValidTile(tilePath, tileMat)) continue;
 
         double dist = findTileDistance(tilePath, lat, lon);
         if (dist < bestDist) {
@@ -431,10 +441,10 @@ cv::Mat MosaicBuilder::getMosaicAroundTile(TileKey center, int radius, cv::Rect&
         for (int ty = minY; ty <= maxY; ++ty) {
             TileKey key{tx, ty};
             std::string path = tiles_.getTilePath(key);
-            if (!fs::exists(path) || !isValidTile(path)) continue;
+            if (!fs::exists(path)) continue;
 
             cv::Mat tile = cv::imread(path, cv::IMREAD_UNCHANGED);
-            if (tile.empty()) continue;
+            if (tile.empty() || !isValidTile(path, tile)) continue; // slight optimizations
 
             int x = (tx - minX) * TILE_SIZE;
             int y = (ty - minY) * TILE_SIZE;

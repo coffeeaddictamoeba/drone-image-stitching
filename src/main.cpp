@@ -4,6 +4,7 @@
 #include <ctime>
 #include <future>
 #include <iostream>
+#include <fstream>
 #include <string>
 #include <filesystem>
 
@@ -16,6 +17,7 @@ const std::string tilesDir = "tiles";
 
 // need to think about better alternative than just creating new mosaics when images do not align
 // AND FIX THE INITIAL ALIGN IMG TRANSPARENCY BUG
+// need better multithreading option. experiment with bs or tbb libs
 
 std::string makeMosaicDir(const std::string& baseDir, int idx) {
     std::string dir = baseDir + "/" + baseDir + "_" + std::to_string(idx);
@@ -143,7 +145,7 @@ void startNewMosaic(const std::string& refImage, const std::string& targetImage,
         std::cerr << "Initial mosaic stitching failed.\n";
         exit(1);
     }
-
+    
     std::cout << "Mosaic stitching completed successfully in " << mosaicDir << ".\n";
     saveTilesAsMosaic(mosaicDir, builder, 0);
 }

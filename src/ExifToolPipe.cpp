@@ -1,5 +1,6 @@
 #include "../include/metadata.h"
 #include <iostream>
+#include <optional>
 #include <regex>
 #include <string>
 #include <unistd.h>
@@ -128,17 +129,72 @@ double ExifToolPipe::parseExifNumber(const std::string& value) const {
     throw std::runtime_error("Failed to parse EXIF numeric value: " + value);
 }
 
-double ExifToolPipe::parseExifGPS(const std::string& value) const {
-    std::string str = std::regex_replace(value, std::regex("^ +| +$|( ) +"), "$1");
-    std::smatch match;
-    std::regex dmsRegex(R"((\d+)[^\d]+(\d+)[^\d]+([\d.]+))"); // DMS format: 54 deg 54' 19.67"
-    if (std::regex_search(str, match, dmsRegex) && match.size() == 4) {
-        double degrees = std::stod(match[1]);
-        double minutes = std::stod(match[2]);
-        double seconds = std::stod(match[3]);
-        return degrees + minutes / 60.0 + seconds / 3600.0;
+// helper function to trim leading and trailing whitespace from a string (looks terrible here so think about separate class for things like that)
+std::string trim(const std::string& str) {
+    size_t first = str.find_first_not_of(" \t\n\r\f\v");
+    if (std::string::npos == first) {
+        return str;
     }
-    throw std::runtime_error("Failed to parse EXIF GPS value: " + value);
+    size_t last = str.find_last_not_of(" \t\n\r\f\v");
+    return str.substr(first, (last - first + 1));
+}
+
+double ExifToolPipe::parseExifGPS(const std::string& dmsStr) const {
+    double deg = 0.0;
+    double min = 0.0;
+    double sec = 0.0;
+    int sign = 1;
+
+    std::string s = trim(dmsStr);
+
+    if (!s.empty()) {
+        char lastChar = s.back();
+        if (lastChar == 'S' || lastChar == 'W') {
+            sign = -1;
+            s.pop_back();
+            s = trim(s);
+        } else if (lastChar == 'N' || lastChar == 'E') {
+            s.pop_back();
+            s = trim(s);
+        }
+    }
+
+    size_t degPos = s.find("deg");
+    size_t minPos = s.find("'");
+    size_t secPos = s.find("\"");
+
+    // try to parse GPS directly
+    if (degPos == std::string::npos && minPos == std::string::npos) {
+        try {
+            return sign * std::stod(s);
+        } catch (const std::exception& e) {
+            std::cerr << "Error parsing as direct decimal: '" << s << "' - " << e.what() << "\n";
+            return 0.0;
+        }
+    }
+
+    try {
+        deg = std::stod(trim(s.substr(0, degPos)));
+        
+        std::string minStr = trim(s.substr(degPos + 3, minPos - (degPos + 3)));
+        min = std::stod(minStr);
+
+        if (secPos != std::string::npos) {
+            std::string secStr = trim(s.substr(minPos + 1, secPos - (minPos + 1)));
+            sec = std::stod(secStr);
+        } else {
+            std::string remainingStr = trim(s.substr(minPos + 1));
+            if (!remainingStr.empty() && std::isdigit(remainingStr[0])) {
+                sec = std::stod(remainingStr);
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error parsing DMS string: '" << dmsStr << "' - " << e.what() << "\n";
+        return 0.0;
+    }
+
+    double decimalDeg = deg + (min / 60.0) + (sec / 3600.0);
+    return sign * decimalDeg;
 }
 
 bool ExifToolPipe::setExifTag(const std::string& imagePath, const std::string& args) {
