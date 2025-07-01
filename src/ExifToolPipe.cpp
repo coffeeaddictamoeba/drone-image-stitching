@@ -163,7 +163,6 @@ double ExifToolPipe::parseExifGPS(const std::string& dmsStr) const {
     size_t minPos = s.find("'");
     size_t secPos = s.find("\"");
 
-    // try to parse GPS directly
     if (degPos == std::string::npos && minPos == std::string::npos) {
         try {
             return sign * std::stod(s);
@@ -175,7 +174,7 @@ double ExifToolPipe::parseExifGPS(const std::string& dmsStr) const {
 
     try {
         deg = std::stod(trim(s.substr(0, degPos)));
-        
+
         std::string minStr = trim(s.substr(degPos + 3, minPos - (degPos + 3)));
         min = std::stod(minStr);
 
@@ -269,8 +268,7 @@ bool ExifToolPipe::setExifTagsBatch(const std::vector<std::string>& imagePaths, 
     if (!sendCommand(cmd.str())) return false;
 
     std::string response = readResponse();
-    return response.find("image files updated") != std::string::npos ||
-           response.find("image files created") != std::string::npos;
+    return response.find("image files updated") != std::string::npos || response.find("image files created") != std::string::npos;
 }
 
 std::map<std::string, double> ExifToolPipe::parseExifValuesToNumbers(const std::map<std::string, std::string>& tagMap) const {
@@ -278,9 +276,18 @@ std::map<std::string, double> ExifToolPipe::parseExifValuesToNumbers(const std::
 
     for (const auto& [key, value] : tagMap) {
         try {
-            result[key] = parseExifNumber(value);
-        } catch (const std::exception& e) {}
+            if (key == EXIFTAGS::GPS_LATITUDE_TAG || key == EXIFTAGS::GPS_LONGITUDE_TAG) {
+                result[key] = parseExifGPS(value);
+            } else {
+                result[key] = std::stod(value);
+            }
+        } catch (const std::invalid_argument& e) {
+            std::cerr << "Warning: Invalid argument for stod/parseExifGPS for tag '" << key << "' with value '" << value << "': " << e.what() << "\n";
+            result[key] = 0.0;
+        } catch (const std::out_of_range& e) {
+            std::cerr << "Warning: Out of range for stod/parseExifGPS for tag '" << key << "' with value '" << value << "': " << e.what() << "\n";
+            result[key] = 0.0;
+        }
     }
-
     return result;
 }

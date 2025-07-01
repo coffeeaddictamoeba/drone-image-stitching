@@ -18,7 +18,7 @@ constexpr double R_M = 6371000.0; // Earth radius in meters
 
 inline const std::regex TILE_REGEX(R"(tile_(\-?\d+)\_(\-?\d+)\.png)"); // searches for pattern "tile_y_x.png"
 
-const std::string COORDS_METADATA = "coords_metadata.txt";
+constexpr const char* COORDS_METADATA = "coords_metadata.txt";
 
 enum class OffsetOrigin {
     TOP_LEFT,
@@ -55,17 +55,17 @@ public:
     TileKey getTileKeyForPoint(int x, int y) const;
     cv::Mat computeGlobalHomography(const TileKey& localOriginKey, const cv::Mat& localHomography);
 
-    double estimateGSD(const std::string& imagePath) const;
-    std::pair<double, double> calculateTileGPS(const TileKey& tileKey, const TileKey& centerTile, double centerLat, double centerLon, double gsd) const;
-    void assignMetadata(const std::string imagePath, double lat, double lon, double alt, double flen) const;
+    double estimateGSD(const std::map<std::string, double> exif) const;
+    std::pair<double, double> calculateTileGPS(const TileKey& tileKey, const TileKey& centerTile, double gsd) const;
+    void assignMetadata(const std::string imagePath, double lat, double lon, double alt, double flen, double gpsDir) const;
 
     void applyImage(const std::string& imagePath, const cv::Mat& homography, bool warpOnce);
 
 private:
     void blendOntoTile(cv::Mat& tile, const cv::Mat& patch, const cv::Rect& roi);
     cv::Mat warpTileRegion(const cv::Mat& input, const cv::Mat& H, const cv::Rect& tileRect) const;
-    void applyImagePerTile(const cv::Mat& img, const cv::Mat& homography, double lat, double lon, double gsd, std::map<std::string, double> exif);
-    void applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homography, double lat, double lon, double gsd, std::map<std::string, double> exif);
+    void applyImagePerTile(const cv::Mat& img, const cv::Mat& homography, double gsd, std::map<std::string, double> exif);
+    void applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homography, double gsd, std::map<std::string, double> exif);
 
     std::string outputDirectory_;
     ExifToolPipe& exiftool_;
@@ -73,6 +73,10 @@ private:
     // globals for knowing the center for offset calculation
     int globalMinX_ = 0, globalMinY_ = 0;
     int globalMaxX_ = 0, globalMaxY_ = 0;
+
+    double globalHeading_ = 0.0;
+    double mosaicOriginLat_ = 0.0; 
+    double mosaicOriginLon_ = 0.0;
 
     TileKey getGlobalCenterTileKey() const;
     void updateGlobalBounds(const TileKey& key);

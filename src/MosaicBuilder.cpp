@@ -310,8 +310,8 @@ bool MosaicBuilder::isValidTile(const std::string tilePath, cv::Mat& tileMat) {
 }
 
 double MosaicBuilder::findTileDistance(std::string tilePath, double latToCompare, double lonToCompare) {
-    double lat = exiftool_.parseExifGPS(exiftool_.getExifTag(tilePath, IMG_GPS_LAT));
-    double lon = exiftool_.parseExifGPS(exiftool_.getExifTag(tilePath, IMG_GPS_LON));
+    double lat = exiftool_.parseExifGPS(exiftool_.getExifTag(tilePath, EXIFTAGS::GPS_LATITUDE_TAG));
+    double lon = exiftool_.parseExifGPS(exiftool_.getExifTag(tilePath, EXIFTAGS::GPS_LONGITUDE_TAG));
 
     double dLat = (lat - latToCompare) * DEG_TO_RAD;
     double dLon = (lon - lonToCompare) * DEG_TO_RAD;
@@ -455,19 +455,22 @@ cv::Mat MosaicBuilder::getMosaicAroundTile(TileKey center, int radius, cv::Rect&
 }
 
 bool MosaicBuilder::addImageToMosaic(const std::string& newImagePath) {
-    std::vector<std::string> sharedTags = {IMG_GPS_LAT, IMG_GPS_LON, IMG_HEIGHT_TAG, IMG_WIDTH_TAG};
+    std::vector<std::string> sharedTags = { 
+                EXIFTAGS::IMAGE_WIDTH_TAG, 
+                EXIFTAGS::IMAGE_HEIGHT_TAG
+            };
 
     auto rawExif = exiftool_.getExifTags(newImagePath, sharedTags);
     auto exif = exiftool_.parseExifValuesToNumbers(rawExif);
 
-    double lat = exiftool_.parseExifGPS(rawExif.at(IMG_GPS_LAT));
-    double lon = exiftool_.parseExifGPS(rawExif.at(IMG_GPS_LON));
+    double lat = exiftool_.parseExifGPS(exiftool_.getExifTag(newImagePath, EXIFTAGS::GPS_LATITUDE_TAG));
+    double lon = exiftool_.parseExifGPS(exiftool_.getExifTag(newImagePath, EXIFTAGS::GPS_LONGITUDE_TAG));
 
     auto bestTileKeyOpt = findClosestTile(lat, lon);
     if (!bestTileKeyOpt) return false;
 
-    int height = exif.at(IMG_HEIGHT_TAG);
-    int width = exif.at(IMG_WIDTH_TAG);
+    int height = exif.at(EXIFTAGS::IMAGE_HEIGHT_TAG);
+    int width = exif.at(EXIFTAGS::IMAGE_WIDTH_TAG);
     int tileRadius = std::ceil(std::max(height, width) / float(TILE_SIZE)) / 2;
     
     TileKey bestKey = *bestTileKeyOpt;

@@ -8,14 +8,15 @@
 #include <map>
 #include <unistd.h>
 
-// Exiftool tags for metadata reference
-const std::string IMG_HEIGHT_TAG = "ImageHeight";
-const std::string IMG_WIDTH_TAG = "ImageWidth";
-const std::string IMG_FOCAL_LEN_TAG = "FocalLength";
-const std::string IMG_GPS_LAT = "GPSLatitude";
-const std::string IMG_GPS_LON = "GPSLongitude";
-const std::string IMG_GPS_ALT = "GPSAltitude";
-
+namespace EXIFTAGS { // compile-time consts
+    constexpr const char* IMAGE_HEIGHT_TAG = "ImageHeight";
+    constexpr const char* IMAGE_WIDTH_TAG = "ImageWidth";
+    constexpr const char* FOCAL_LENGTH_TAG = "FocalLength";
+    constexpr const char* GPS_LATITUDE_TAG = "GPSLatitude";
+    constexpr const char* GPS_LONGITUDE_TAG = "GPSLongitude";
+    constexpr const char* GPS_ALTITUDE_TAG = "GPSAltitude";
+    constexpr const char* GPS_IMG_DIRECTION_TAG = "GPSImgDirection";
+}
 
 class ExifToolPipe {
 public:
