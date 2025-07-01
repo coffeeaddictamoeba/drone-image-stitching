@@ -36,7 +36,6 @@ bool FeatureMatcher::computeHomography(const ImageMatrix src, const ImageMatrix 
     std::vector<cv::KeyPoint> kp1, kp2;
     cv::Mat desc1, desc2;
 
-    const std::string& srcPath = src.imagePath;
     const std::string& dstPath = dst.imagePath;
 
     detectAndDescribe(src.imageMatrix, kp1, desc1);

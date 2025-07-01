@@ -77,6 +77,7 @@ private:
     double globalHeading_ = 0.0;
     double mosaicOriginLat_ = 0.0; 
     double mosaicOriginLon_ = 0.0;
+    TileKey mosaicCenterOrigin_{0, 0};
 
     TileKey getGlobalCenterTileKey() const;
     void updateGlobalBounds(const TileKey& key);

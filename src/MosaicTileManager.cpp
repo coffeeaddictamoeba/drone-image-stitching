@@ -36,6 +36,7 @@ void TileManager::loadGlobalMetadata() {
     double double_value;
     int int_value;
 
+    // to debug just check the tiles/tiles_x/coords_metadata.txt
     while (in >> key) {
         if (key == "min_x:") {in >> int_value; globalMinX_ = int_value;}
         else if (key == "min_y:") {in >> int_value; globalMinY_ = int_value;}
@@ -44,14 +45,9 @@ void TileManager::loadGlobalMetadata() {
         else if (key == "heading:") {in >> double_value; globalHeading_ = double_value;}
         else if (key == "origin_lat:") { in >> double_value; mosaicOriginLat_ = double_value; }
         else if (key == "origin_lon:") { in >> double_value; mosaicOriginLon_ = double_value; }
+        else if (key == "center_x:") {in >> int_value; mosaicCenterOrigin_.x = int_value; }
+        else if (key == "center_y:") {in >> int_value; mosaicCenterOrigin_.y = int_value; }
     }
-
-    #ifdef DEBUG
-    std::cout << "DEBUG: Loaded global metadata: min_x=" << globalMinX_ << ", min_y=" << globalMinY_
-              << ", max_x=" << globalMaxX_ << ", max_y=" << globalMaxY_ << ", heading=" << globalHeading_
-              << ", origin_lat=" << std::fixed << std::setprecision(10) << mosaicOriginLat_
-              << ", origin_lon=" << std::fixed << std::setprecision(10) << mosaicOriginLon_ << "\n";
-    #endif
 }
 
 void TileManager::saveGlobalMetadata() const {
@@ -63,7 +59,9 @@ void TileManager::saveGlobalMetadata() const {
         << "max_y: " << globalMaxY_ << "\n"
         << "heading: " << globalHeading_ << "\n"
         << "origin_lat: " << std::fixed << std::setprecision(10) << mosaicOriginLat_ << "\n"
-        << "origin_lon: " << std::fixed << std::setprecision(10) << mosaicOriginLon_ << "\n";
+        << "origin_lon: " << std::fixed << std::setprecision(10) << mosaicOriginLon_ << "\n"
+        << "center_x: " << mosaicCenterOrigin_.x << "\n"
+        << "center_y: " << mosaicCenterOrigin_.y << "\n";
 }
 
 void TileManager::updateGlobalBounds(const TileKey& key) {
@@ -81,32 +79,9 @@ TileKey TileManager::getGlobalCenterTileKey() const {
     };
 }
 
-// std::pair<double, double> TileManager::calculateTileGPS(const TileKey& tileKey, const TileKey& centerTile, double centerLat, double centerLon, double gsd) const {
-//     int dx = tileKey.x - centerTile.x;
-//     int dy = tileKey.y - centerTile.y;
-
-//     double offsetX_m = static_cast<double>(dx) * TILE_SIZE * gsd;
-//     double offsetY_m = static_cast<double>(dy) * TILE_SIZE * gsd;
-
-//     double hrad = globalHeading_ * M_PI / 180.0;
-
-//     double angleX = (globalHeading_ + 90.0) * M_PI / 180.0;
-//     double angleY = (globalHeading_ + 180.0) * M_PI / 180.0;
-
-//     double eastOffset = (offsetX_m * std::sin(angleX)) + (offsetY_m * std::sin(angleY));
-//     double northOffset = (offsetX_m * std::cos(angleX)) + (offsetY_m * std::cos(angleY));
-    
-//     double metersPerDegLon = M_PER_DEGREE_LATITUDE * std::cos(centerLat * M_PI / 180.0);
-
-//     double lat = centerLat - (northOffset / M_PER_DEGREE_LATITUDE);
-//     double lon = centerLon + (eastOffset / metersPerDegLon);
-
-//     return {lat, lon};
-// }
-
-std::pair<double, double> TileManager::calculateTileGPS(const TileKey& tileKey, const TileKey& startTile, double gsd) const {
-    int dx = tileKey.x - startTile.x;
-    int dy = tileKey.y - startTile.y;
+std::pair<double, double> TileManager::calculateTileGPS(const TileKey& tileKey, const TileKey& centerTile, double gsd) const {
+    int dx = centerTile.x - tileKey.x; // highly questionable, but who cares if it works
+    int dy = centerTile.y - tileKey.y; // if this works it means that x-axis at some point is inverted. it was the case even before globalHeading_.
 
     double offsetX_m = static_cast<double>(dx) * TILE_SIZE * gsd;
     double offsetY_m = static_cast<double>(dy) * TILE_SIZE * gsd;
@@ -139,8 +114,8 @@ std::pair<double, double> TileManager::calculateTileGPS(const TileKey& tileKey, 
 double TileManager::estimateGSD(const std::map<std::string, double> exif) const {
     if (exif.count(EXIFTAGS::FOCAL_LENGTH_TAG) && exif.count(EXIFTAGS::IMAGE_WIDTH_TAG) && exif.at(EXIFTAGS::FOCAL_LENGTH_TAG) != 0.0 && exif.at(EXIFTAGS::IMAGE_WIDTH_TAG) != 0.0) {
         double alt = exif.count(EXIFTAGS::GPS_ALTITUDE_TAG) ? exif.at(EXIFTAGS::GPS_ALTITUDE_TAG) : 0.0;
-        double flen = exif.count(EXIFTAGS::FOCAL_LENGTH_TAG) ? exif.at(EXIFTAGS::FOCAL_LENGTH_TAG) : 0.0;
-        double width_px = exif.count(EXIFTAGS::IMAGE_WIDTH_TAG) ? exif.at(EXIFTAGS::IMAGE_WIDTH_TAG) : 0.0;
+        double flen = exif.at(EXIFTAGS::FOCAL_LENGTH_TAG);
+        double width_px = exif.at(EXIFTAGS::IMAGE_WIDTH_TAG);
         return (3.674 * alt) / (flen * width_px);
     }
     return 0.0;
@@ -228,8 +203,8 @@ void TileManager::applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homograp
         maxY = std::max(maxY, p.y);
     }
 
-    int width = std::ceil(maxX - minX);
-    int height = std::ceil(maxY - minY);
+    int width = static_cast<int>(std::ceil(maxX - minX));
+    int height = static_cast<int>(std::ceil(maxY - minY));
 
     cv::Mat warpCanvas(height, width, CV_8UC4, cv::Scalar(0, 0, 0, 0));
 
@@ -266,7 +241,7 @@ void TileManager::applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homograp
             cv::Mat mask = channels[3] > 0;
             patch.copyTo(tile, mask);
 
-            auto [tileLat, tileLon] = calculateTileGPS(key, TileKey{0,0}, gsd);
+            auto [tileLat, tileLon] = calculateTileGPS(key, mosaicCenterOrigin_, gsd);
             saveTile(key, tile, tileLat, tileLon, exif);
             updateGlobalBounds(key);
         }
@@ -309,7 +284,7 @@ void TileManager::applyImagePerTile(const cv::Mat& img, const cv::Mat& homograph
             cv::Mat mask = channels[3] > 0;
             patch.copyTo(tile, mask);
 
-            auto [tileLat, tileLon] = calculateTileGPS(key, TileKey{0, 0}, gsd);
+            auto [tileLat, tileLon] = calculateTileGPS(key, mosaicCenterOrigin_, gsd);
             saveTile(key, tile, tileLat, tileLon, exif);
             updateGlobalBounds(key);
         }
@@ -322,6 +297,7 @@ void TileManager::applyImage(const std::string& imagePath, const cv::Mat& homogr
     std::vector<std::string> sharedTags = {
         EXIFTAGS::GPS_ALTITUDE_TAG, 
         EXIFTAGS::FOCAL_LENGTH_TAG, 
+        EXIFTAGS::IMAGE_HEIGHT_TAG,
         EXIFTAGS::IMAGE_WIDTH_TAG,
         EXIFTAGS::GPS_IMG_DIRECTION_TAG,
         EXIFTAGS::GPS_LATITUDE_TAG,
@@ -331,6 +307,7 @@ void TileManager::applyImage(const std::string& imagePath, const cv::Mat& homogr
     auto rawExifMap = exiftool_.getExifTags(imagePath, sharedTags);
     auto parsedExif = exiftool_.parseExifValuesToNumbers(rawExifMap);
 
+    #ifdef DEBUG
     std::cout << "DEBUG: Image path: " << imagePath << "\n";
     std::cout << "  GPS_ALTITUDE_TAG: " << std::fixed << std::setprecision(10) << (parsedExif.count(EXIFTAGS::GPS_ALTITUDE_TAG) ? parsedExif.at(EXIFTAGS::GPS_ALTITUDE_TAG) : 0.0) << "\n";
     std::cout << "  FOCAL_LENGTH_TAG: " << std::fixed << std::setprecision(10) << (parsedExif.count(EXIFTAGS::FOCAL_LENGTH_TAG) ? parsedExif.at(EXIFTAGS::FOCAL_LENGTH_TAG) : 0.0) << "\n";
@@ -338,13 +315,21 @@ void TileManager::applyImage(const std::string& imagePath, const cv::Mat& homogr
     std::cout << "DEBUG: Parsed Image Lat: " << std::fixed << std::setprecision(10) << (parsedExif.count(EXIFTAGS::GPS_LATITUDE_TAG) ? parsedExif.at(EXIFTAGS::GPS_LATITUDE_TAG) : 0.0) << "\n";
     std::cout << "DEBUG: Parsed Image Lon: " << std::fixed << std::setprecision(10) << (parsedExif.count(EXIFTAGS::GPS_LONGITUDE_TAG) ? parsedExif.at(EXIFTAGS::GPS_LONGITUDE_TAG) : 0.0) << "\n";
     std::cout << "DEBUG: Parsed GPSImgDirection: " << std::fixed << std::setprecision(2) << (parsedExif.count(EXIFTAGS::GPS_IMG_DIRECTION_TAG) ? parsedExif.at(EXIFTAGS::GPS_IMG_DIRECTION_TAG) : 0.0) << "\n";
-    std::cout << "DEBUG: Current globalHeading_ (before potential update): " << std::fixed << std::setprecision(2) << globalHeading_ << "\n";
+    #endif
 
     if (globalMinX_ == 0 && globalMinY_ == 0 && globalMaxX_ == 0 && globalMaxY_ == 0) {
         if (parsedExif.count(EXIFTAGS::GPS_IMG_DIRECTION_TAG)) {
             globalHeading_ = parsedExif.at(EXIFTAGS::GPS_IMG_DIRECTION_TAG);
             mosaicOriginLat_ = parsedExif.at(EXIFTAGS::GPS_LATITUDE_TAG);
             mosaicOriginLon_ = parsedExif.at(EXIFTAGS::GPS_LONGITUDE_TAG);
+
+            // predicting center tile for correct gps offset
+            int centerTileX = static_cast<int>(parsedExif.at(EXIFTAGS::IMAGE_WIDTH_TAG) / 2.0);
+            int centerTileY = static_cast<int>(parsedExif.at(EXIFTAGS::IMAGE_HEIGHT_TAG) / 2.0);
+    
+            mosaicCenterOrigin_.x = static_cast<int>(std::floor(static_cast<double>(centerTileX) / TILE_SIZE));
+            mosaicCenterOrigin_.y = static_cast<int>(std::floor(static_cast<double>(centerTileY) / TILE_SIZE));
+
             #ifdef DEBUG
             std::cout << "DEBUG: First image detected. Setting globalHeading_ to " << globalHeading_ << " from current image.\n";
             #endif
