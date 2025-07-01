@@ -96,8 +96,8 @@ std::pair<double, double> TileManager::calculateTileGPS(const TileKey& tileKey, 
     
     double metersPerDegLon = M_PER_DEGREE_LATITUDE * std::cos(mosaicOriginLat_ * M_PI / 180.0);
 
-    double lat = mosaicOriginLat_ + (true_north_offset_m / M_PER_DEGREE_LATITUDE);
-    double lon = mosaicOriginLon_ + (true_east_offset_m / metersPerDegLon);
+    double lat = mosaicOriginLat_ + (true_north_offset_m / M_PER_DEGREE_LATITUDE) - 0.001; // why??
+    double lon = mosaicOriginLon_ + (true_east_offset_m / metersPerDegLon) - 0.001;
 
     #ifdef DEBUG
     std::cout << std::fixed << std::setprecision(10); // Set precision for all subsequent double outputs
@@ -186,6 +186,78 @@ cv::Mat TileManager::computeGlobalHomography(const TileKey& localOriginKey, cons
     return offsetMat * localHomography;
 }
 
+void TileManager::blendOntoTile(cv::Mat& tile, const cv::Mat& patch, const cv::Rect& roi, int featheringPx) {
+    if (patch.empty() || patch.channels() != 4 || tile.empty() || tile.channels() != 4) {
+        #ifdef DEBUG
+        std::cerr << "[WARN] blendOntoTile: Invalid input image or patch. Skipping blending.\n";
+        #endif
+        return;
+    }
+    
+    cv::Rect valid_roi = roi & cv::Rect(0, 0, tile.cols, tile.rows);
+    if (valid_roi.empty() || valid_roi.width != patch.cols || valid_roi.height != patch.rows) {
+        #ifdef DEBUG
+        std::cerr << "[WARN] blendOntoTile: ROI or patch size mismatch or invalid. Doing simple copy.\n";
+        #endif
+        //patch.copyTo(tile(roi), patch_channels[3]); 
+        return;
+    }
+
+    std::vector<cv::Mat> tile_channels(4);
+    std::vector<cv::Mat> patch_channels(4);
+    cv::split(tile(valid_roi), tile_channels);
+    cv::split(patch, patch_channels);
+
+    cv::Mat tile_alpha = tile_channels[3];
+    cv::Mat patch_alpha = patch_channels[3];
+
+    cv::Mat blend_weight(patch.size(), CV_32FC1);
+
+    cv::Mat patch_opaque_mask = patch_alpha > 0;
+    cv::Mat dist_transform;
+    cv::distanceTransform(patch_opaque_mask, dist_transform, cv::DIST_L2, cv::DIST_MASK_PRECISE);
+
+    for (int r = 0; r < patch.rows; ++r) {
+        for (int c = 0; c < patch.cols; ++c) {
+            float dist = dist_transform.at<float>(r, c);
+            blend_weight.at<float>(r, c) = std::min(1.0f, dist / static_cast<float>(featheringPx));
+        }
+    }
+
+    for (int r = 0; r < patch.rows; ++r) {
+        for (int c = 0; c < patch.cols; ++c) {
+            unsigned char new_alpha_raw = patch_alpha.at<unsigned char>(r, c);
+            unsigned char existing_alpha_raw = tile_alpha.at<unsigned char>(r, c);
+
+            float weight = blend_weight.at<float>(r, c);
+
+            double new_effective_alpha_norm = (static_cast<double>(new_alpha_raw) / 255.0) * weight;
+            double existing_alpha_norm = static_cast<double>(existing_alpha_raw) / 255.0;
+
+            double final_alpha_norm = new_effective_alpha_norm + existing_alpha_norm * (1.0 - new_effective_alpha_norm);
+
+            if (final_alpha_norm > 1e-6) {
+                for (int k = 0; k < 3; ++k) { // B, G, R channels
+                    double new_color_val = static_cast<double>(patch_channels[k].at<unsigned char>(r, c));
+                    double existing_color_val = static_cast<double>(tile_channels[k].at<unsigned char>(r, c));
+
+                    double blended_color_val = (new_color_val * new_effective_alpha_norm + 
+                                                existing_color_val * existing_alpha_norm * (1.0 - new_effective_alpha_norm)) / final_alpha_norm;
+                    tile_channels[k].at<unsigned char>(r, c) = static_cast<unsigned char>(std::min(255.0, std::max(0.0, blended_color_val)));
+                }
+                tile_channels[3].at<unsigned char>(r, c) = static_cast<unsigned char>(std::min(255.0, std::max(0.0, final_alpha_norm * 255.0)));
+            } else {
+                for (int k = 0; k < 3; ++k) {
+                    tile_channels[k].at<unsigned char>(r, c) = 0;
+                }
+                tile_channels[3].at<unsigned char>(r, c) = 0;
+            }
+        }
+    }
+    
+    cv::merge(tile_channels, tile(valid_roi));
+}
+
 void TileManager::applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homography, double gsd, std::map<std::string, double> exif) {
     std::vector<cv::Point2f> corners = {
         {0, 0},
@@ -236,10 +308,8 @@ void TileManager::applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homograp
             cv::Mat tile = loadTile(key);
             cv::Mat patch = warpCanvas(localTileRect);
 
-            std::vector<cv::Mat> channels;
-            cv::split(patch, channels);
-            cv::Mat mask = channels[3] > 0;
-            patch.copyTo(tile, mask);
+            cv::Rect patch_roi_on_tile(0, 0, patch.cols, patch.rows); 
+            blendOntoTile(tile, patch, patch_roi_on_tile, FEATHERING_SIZE);
 
             auto [tileLat, tileLon] = calculateTileGPS(key, mosaicCenterOrigin_, gsd);
             saveTile(key, tile, tileLat, tileLon, exif);
@@ -279,10 +349,8 @@ void TileManager::applyImagePerTile(const cv::Mat& img, const cv::Mat& homograph
             cv::Mat patch = warpTileRegion(img, homography, tileRect);
             if (patch.empty()) continue;
 
-            std::vector<cv::Mat> channels;
-            cv::split(patch, channels);
-            cv::Mat mask = channels[3] > 0;
-            patch.copyTo(tile, mask);
+            cv::Rect patch_roi_on_tile(0, 0, patch.cols, patch.rows); 
+            blendOntoTile(tile, patch, patch_roi_on_tile, FEATHERING_SIZE);
 
             auto [tileLat, tileLon] = calculateTileGPS(key, mosaicCenterOrigin_, gsd);
             saveTile(key, tile, tileLat, tileLon, exif);

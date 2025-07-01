@@ -12,6 +12,7 @@
 #include "fmatch.h"
 
 constexpr int TILE_SIZE = 512;
+constexpr int FEATHERING_SIZE = 50; // smoothness value
 constexpr double M_PER_DEGREE_LATITUDE = 111320.0;
 constexpr double DEG_TO_RAD = M_PI / 180.0;
 constexpr double R_M = 6371000.0; // Earth radius in meters
@@ -62,7 +63,7 @@ public:
     void applyImage(const std::string& imagePath, const cv::Mat& homography, bool warpOnce);
 
 private:
-    void blendOntoTile(cv::Mat& tile, const cv::Mat& patch, const cv::Rect& roi);
+    void blendOntoTile(cv::Mat& tile, const cv::Mat& patch, const cv::Rect& roi, int featheringPx);
     cv::Mat warpTileRegion(const cv::Mat& input, const cv::Mat& H, const cv::Rect& tileRect) const;
     void applyImagePerTile(const cv::Mat& img, const cv::Mat& homography, double gsd, std::map<std::string, double> exif);
     void applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homography, double gsd, std::map<std::string, double> exif);
