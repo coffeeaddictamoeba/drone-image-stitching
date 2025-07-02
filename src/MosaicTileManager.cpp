@@ -1,7 +1,8 @@
 #include "../include/mosaic.h"
 #include "../include/fmatch.h"
-#include "../external/ctre.hpp" // for compile-time regex
+#include "../external/ctre.hpp"
 #include <cmath>
+#include <filesystem>
 #include <opencv4/opencv2/imgcodecs.hpp>
 #include <iostream>
 #include <fstream>
@@ -21,6 +22,10 @@ TileKey TileManager::getTileKeyForPoint(int x, int y) const {
 
 std::string TileManager::getOutputDirectory() const {
     return outputDirectory_;
+}
+
+TileKey TileManager::getTempClosestKey() const {
+    return tempClosestKey_;
 }
 
 std::string TileManager::getTilePath(const TileKey& key) const {
@@ -196,47 +201,24 @@ cv::Mat TileManager::computeGlobalHomography(const TileKey& localOriginKey, cons
     return offsetMat * localHomography;
 }
 
-bool TileManager::isValidTile(const std::string tilePath, cv::Mat& tileMat) {
-    const int channels = tileMat.channels();
+bool TileManager::isMostlyTransparent(const cv::Mat& tileMat, double threshold = 0.4) const { // way more flexible than isTransparent
+    if (tileMat.channels() != 4) return false;
 
-    if (channels == 4) {
-        const uchar* pixel = tileMat.ptr<uchar>(0);
-        const size_t totalPixels = tileMat.total();
-        bool hasVisiblePixel = false;
+    const int totalPixels = tileMat.rows * tileMat.cols;
+    const uchar* pixelData = tileMat.ptr<uchar>(0);
 
-        for (size_t i = 0; i < totalPixels; ++i) {
-            uchar alpha = pixel[i * 4 + 3];
-            if (alpha > 0) {
-                hasVisiblePixel = true;
-                break;
+    int transparentCount = 0;
+    const uchar alphaThreshold = 10;
+
+    for (int i = 0; i < totalPixels; ++i) {
+        if (pixelData[i * 4 + 3] < alphaThreshold) {
+            transparentCount++;
+            if (static_cast<double>(transparentCount) / totalPixels >= threshold) {
+                return true;
             }
         }
-
-        if (!hasVisiblePixel) {
-            #ifdef DEBUG
-            std::cout << "Skipping fully transparent tile: " << tilePath << "\n";
-            #endif
-            return false;
-        }
     }
-
-    double minVal = 0, maxVal = 0;
-    if (channels == 1) {
-        cv::minMaxLoc(tileMat, &minVal, &maxVal);
-    } else if (channels >= 3) {
-        std::vector<cv::Mat> ch;
-        cv::split(tileMat, ch);
-        cv::Mat intensity = 0.299 * ch[2] + 0.587 * ch[1] + 0.114 * ch[0]; // avoid cvtColor
-        cv::minMaxLoc(intensity, &minVal, &maxVal);
-    }
-
-    if (std::abs(maxVal - minVal) < 1e-3) {
-        #ifdef DEBUG
-        std::cout << "Skipping visually uniform tile: " << tilePath << "\n";
-        #endif
-        return false;
-    }
-    return true;
+    return false;
 }
 
 double TileManager::findTileDistance(std::string tilePath, double latToCompare, double lonToCompare) {
@@ -256,7 +238,7 @@ double TileManager::findTileDistance(std::string tilePath, double latToCompare, 
     return WGS84_A * c; // distance in meters
 }
 
-std::optional<TileKey> TileManager::findClosestTile(double lat, double lon) {
+std::optional<TileKey> TileManager::findClosestTile(double lat, double lon) { // with BFS now
     if (lat == 0.0 || lon == 0.0) {
         #ifdef DEBUG
         std::cerr << "[WARN] Image has no valid GPS coordinates.\n";
@@ -264,23 +246,46 @@ std::optional<TileKey> TileManager::findClosestTile(double lat, double lon) {
         return std::nullopt;
     }
 
-    double bestDist = DBL_MAX;
+    std::set<TileKey> visited;
+    std::queue<TileKey> queue;
     std::optional<TileKey> bestKey;
+    double bestDist = DBL_MAX;
 
-    for (const auto& entry : fs::directory_iterator(getOutputDirectory())) {
-        const std::string filename = entry.path().filename().string();
-        if (auto m = ctre::match<R"(tile_(-?\d+)_(-?\d+)\.png)">(filename)) { // searches for pattern "tile_y_x.png"
-            auto ty = std::stoi(std::string{m.get<1>().to_view()});
-            auto tx = std::stoi(std::string{m.get<2>().to_view()});
-            std::string tilePath = entry.path().string();
-    
-            cv::Mat tileMat = cv::imread(tilePath, cv::IMREAD_UNCHANGED);
-            if (tileMat.empty() || !isValidTile(tilePath, tileMat)) continue;
-    
-            double dist = findTileDistance(tilePath, lat, lon);
-            if (dist < bestDist) {
-                bestDist = dist;
-                bestKey = TileKey{tx, ty};
+    // BFS perimeter
+    for (int x = globalMinX_; x <= globalMaxX_; ++x) {
+        queue.push(TileKey{x, globalMinY_});
+        queue.push(TileKey{x, globalMaxY_});
+    }
+    for (int y = globalMinY_ + 1; y < globalMaxY_; ++y) {
+        queue.push(TileKey{globalMinX_, y});
+        queue.push(TileKey{globalMaxX_, y});
+    }
+
+    while (!queue.empty()) {
+        TileKey key = queue.front();
+        queue.pop();
+
+        if (visited.contains(key)) continue;
+        visited.insert(key);
+
+        std::string tilePath = getTilePath(key);
+        if (!fs::exists(tilePath)) continue;
+
+        cv::Mat tileMat = cv::imread(tilePath, cv::IMREAD_UNCHANGED);
+        if (tileMat.empty()) continue;
+
+        if (isMostlyTransparent(tileMat)) continue;
+
+        double dist = findTileDistance(tilePath, lat, lon);
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestKey = key;
+        }
+
+        for (const auto& [dx, dy] : std::array<std::pair<int, int>, 4>{{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}}) {
+            TileKey neighbor{key.x + dx, key.y + dy};
+            if (!visited.contains(neighbor)) {
+                queue.push(neighbor);
             }
         }
     }
@@ -293,81 +298,80 @@ std::optional<TileKey> TileManager::findClosestTile(double lat, double lon) {
     }
 
     #ifdef DEBUG
-    std::cout << "Tile candidate (GPS closest): " << getTilePath(*bestKey) << '\n';
+    std::cout << "Closest tile (BFS frontier): " << getTilePath(*bestKey) << '\n';
     #endif
+
+    tempClosestKey_ = *bestKey;
     return bestKey;
 }
 
 void TileManager::blendOntoTile(cv::Mat& tile, const cv::Mat& patch, const cv::Rect& roi, int featheringPx) {
-    if (patch.empty() || patch.channels() != 4 || tile.empty() || tile.channels() != 4) {
+    if (patch.empty() || tile.empty() || patch.channels() != 4 || tile.channels() != 4) {
         #ifdef DEBUG
         std::cerr << "[WARN] blendOntoTile: Invalid input image or patch. Skipping blending.\n";
         #endif
         return;
     }
-    
+
     cv::Rect validROI = roi & cv::Rect(0, 0, tile.cols, tile.rows);
     if (validROI.empty() || validROI.width != patch.cols || validROI.height != patch.rows) {
-        #ifdef DEBUG
-        std::cerr << "[WARN] blendOntoTile: ROI or patch size mismatch or invalid. Doing simple copy.\n";
-        #endif
-        if (patch.channels() == 4) {
-            std::vector<cv::Mat> patchChannels(4);
-            cv::split(patch, patchChannels);
-            patch.copyTo(tile(roi), patchChannels[3]);
-        } else {
-            patch.copyTo(tile(roi)); 
-        }
+        std::vector<cv::Mat> patchChannels;
+        cv::split(patch, patchChannels);
+        patch.copyTo(tile(roi), patchChannels[3]);
         return;
     }
 
-    std::vector<cv::Mat> tileChannels(4);
-    std::vector<cv::Mat> patchChannels(4);
+    std::vector<cv::Mat> tileChannels(4), patchChannels(4);
     cv::split(tile(validROI), tileChannels);
     cv::split(patch, patchChannels);
 
-    cv::Mat tileAlpha = tileChannels[3];
     cv::Mat patchAlpha = patchChannels[3];
+    cv::Mat tileAlpha = tileChannels[3];
 
-    cv::Mat blendWeight(patch.size(), CV_32FC1);
+    cv::Mat patchOpaqueMask;
+    cv::compare(patchAlpha, 0, patchOpaqueMask, cv::CMP_GT);
 
-    cv::Mat patchOpaqueMask = patchAlpha > 0;
     cv::Mat distTransform;
-    cv::distanceTransform(patchOpaqueMask, distTransform, cv::DIST_L2, cv::DIST_MASK_PRECISE);
+    cv::distanceTransform(patchOpaqueMask, distTransform, cv::DIST_L2, 3);
 
-    for (int r = 0; r < patch.rows; ++r) {
-        for (int c = 0; c < patch.cols; ++c) {
-            float dist = distTransform.at<float>(r, c);
-            blendWeight.at<float>(r, c) = std::min(1.0f, dist / static_cast<float>(featheringPx));
-        }
-    }
+    cv::Mat blendWeightFloat;
+    distTransform.convertTo(blendWeightFloat, CV_32F, 1.0f / featheringPx);
+    cv::threshold(blendWeightFloat, blendWeightFloat, 1.0, 1.0, cv::THRESH_TRUNC);
 
-    for (int r = 0; r < patch.rows; ++r) {
-        for (int c = 0; c < patch.cols; ++c) {
-            unsigned char newAlphaRaw = patchAlpha.at<unsigned char>(r, c);
-            unsigned char existingAlphaRaw = tileAlpha.at<unsigned char>(r, c);
+    // convertion of float weights [0.0–1.0] to 8-bit [0–255]
+    cv::Mat blendWeight;
+    blendWeightFloat.convertTo(blendWeight, CV_8U, 255.0);
 
-            float weight = blendWeight.at<float>(r, c);
+    const int rows = patch.rows;
+    const int cols = patch.cols;
 
-            double newEffectiveAlphaNorm = (static_cast<double>(newAlphaRaw) / 255.0) * weight;
-            double existingAlphaNorm = static_cast<double>(existingAlphaRaw) / 255.0;
+    for (int r = 0; r < rows; ++r) {
+        const uchar* wPtr = blendWeight.ptr<uchar>(r);
+        const uchar* pAlpha = patchAlpha.ptr<uchar>(r);
+        uchar* tAlpha = tileAlpha.ptr<uchar>(r);
 
-            double finalAlphaNorm = newEffectiveAlphaNorm + existingAlphaNorm * (1.0 - newEffectiveAlphaNorm);
+        uchar* pR = patchChannels[0].ptr<uchar>(r);
+        uchar* pG = patchChannels[1].ptr<uchar>(r);
+        uchar* pB = patchChannels[2].ptr<uchar>(r);
 
-            if (finalAlphaNorm > 1e-6) {
-                for (int k = 0; k < 3; ++k) { // B, G, R channels
-                    double newColorVal = static_cast<double>(patchChannels[k].at<unsigned char>(r, c));
-                    double existingColorVal = static_cast<double>(tileChannels[k].at<unsigned char>(r, c));
+        uchar* tR = tileChannels[0].ptr<uchar>(r);
+        uchar* tG = tileChannels[1].ptr<uchar>(r);
+        uchar* tB = tileChannels[2].ptr<uchar>(r);
 
-                    double blendedColorVal = (newColorVal * newEffectiveAlphaNorm + existingColorVal * existingAlphaNorm * (1.0 - newEffectiveAlphaNorm)) / finalAlphaNorm;
-                    tileChannels[k].at<unsigned char>(r, c) = static_cast<unsigned char>(std::min(255.0, std::max(0.0, blendedColorVal)));
-                }
-                tileChannels[3].at<unsigned char>(r, c) = static_cast<unsigned char>(std::min(255.0, std::max(0.0, finalAlphaNorm * 255.0)));
+        for (int c = 0; c < cols; ++c) {
+            float w = wPtr[c] / 255.0f;
+            float aNew = (pAlpha[c] / 255.0f) * w;
+            float aOld = tAlpha[c] / 255.0f;
+            float aFinal = aNew + aOld * (1.0f - aNew);
+
+            if (aFinal > 1e-6f) {
+                float invA = 1.0f / aFinal;
+                tR[c] = static_cast<uchar>(cv::saturate_cast<uchar>((pR[c] * aNew + tR[c] * aOld * (1.0f - aNew)) * invA));
+                tG[c] = static_cast<uchar>(cv::saturate_cast<uchar>((pG[c] * aNew + tG[c] * aOld * (1.0f - aNew)) * invA));
+                tB[c] = static_cast<uchar>(cv::saturate_cast<uchar>((pB[c] * aNew + tB[c] * aOld * (1.0f - aNew)) * invA));
+                tAlpha[c] = static_cast<uchar>(cv::saturate_cast<uchar>(aFinal * 255.0f));
             } else {
-                for (int k = 0; k < 3; ++k) {
-                    tileChannels[k].at<unsigned char>(r, c) = 0;
-                }
-                tileChannels[3].at<unsigned char>(r, c) = 0;
+                tR[c] = tG[c] = tB[c] = tAlpha[c] = 0;
             }
         }
     }
@@ -410,9 +414,14 @@ void TileManager::applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homograp
     int tx1 = std::floor(maxX / TILE_SIZE), ty1 = std::floor(maxY / TILE_SIZE);
 
     // now image center depends on the tile that was chosen by GPS
-    // think about optimizing this logic in terms of not finding the same bestKey twice (in MosaicBuilder and TileManager)
-    auto closestTile = findClosestTile(exif.at(EXIFTAGS::GPS_LATITUDE_TAG), exif.at(EXIFTAGS::GPS_LONGITUDE_TAG));
-    TileKey bestKey = *closestTile;
+    TileKey bestKey;
+    if (tempClosestKey_ == TileKey{0, 0}) {
+        auto closest = findClosestTile(exif.at(EXIFTAGS::GPS_LATITUDE_TAG), exif.at(EXIFTAGS::GPS_LONGITUDE_TAG));
+        bestKey = *closest;
+    } else { 
+        bestKey.x = tempClosestKey_.x;
+        bestKey.y = tempClosestKey_.y;
+    }
 
     for (int ty = ty0; ty <= ty1; ++ty) {
         for (int tx = tx0; tx <= tx1; ++tx) {
@@ -437,6 +446,8 @@ void TileManager::applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homograp
             updateGlobalBounds(key);
         }
     }
+    tempClosestKey_.x = 0;
+    tempClosestKey_.y = 0;
 }
 
 void TileManager::applyImagePerTile(const cv::Mat& img, const cv::Mat& homography, double gsd, std::map<std::string, double> exif) {

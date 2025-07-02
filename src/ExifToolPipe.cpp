@@ -1,6 +1,7 @@
 #include "../include/metadata.h"
+#include "../include/strutils.hpp"
+#include "../external/ctre.hpp"
 #include <iostream>
-#include <optional>
 #include <regex>
 #include <string>
 #include <unistd.h>
@@ -10,8 +11,6 @@
 #include <sstream>
 #include <string.h>
 #include <poll.h>
-#include <chrono>
-#include <thread>
 
 void ExifToolPipe::closeFd(int& fd) {
     if (fd != -1) {
@@ -121,22 +120,10 @@ std::map<std::string, std::string> ExifToolPipe::getLastExifData() {
 }
 
 double ExifToolPipe::parseExifNumber(const std::string& value) const {
-    std::smatch match;
-    std::regex numberRegex(R"([-+]?\d*\.?\d+)");
-    if (std::regex_search(value, match, numberRegex)) {
-        return std::stod(match.str());
+    if (auto m = ctre::search<R"((\+|-)?\d*(\.\d+)?)">(value)) {
+        return utils::to_double(m.to_view());
     }
     throw std::runtime_error("Failed to parse EXIF numeric value: " + value);
-}
-
-// helper function to trim leading and trailing whitespace from a string (looks terrible here so think about separate class for things like that)
-std::string trim(const std::string& str) {
-    size_t first = str.find_first_not_of(" \t\n\r\f\v");
-    if (std::string::npos == first) {
-        return str;
-    }
-    size_t last = str.find_last_not_of(" \t\n\r\f\v");
-    return str.substr(first, (last - first + 1));
 }
 
 double ExifToolPipe::parseExifGPS(const std::string& dmsStr) const {
@@ -145,17 +132,17 @@ double ExifToolPipe::parseExifGPS(const std::string& dmsStr) const {
     double sec = 0.0;
     int sign = 1;
 
-    std::string s = trim(dmsStr);
+    std::string s = utils::trim(dmsStr);
 
     if (!s.empty()) {
         char lastChar = s.back();
         if (lastChar == 'S' || lastChar == 'W') {
             sign = -1;
             s.pop_back();
-            s = trim(s);
+            s = utils::trim(s);
         } else if (lastChar == 'N' || lastChar == 'E') {
             s.pop_back();
-            s = trim(s);
+            s = utils::trim(s);
         }
     }
 
@@ -173,16 +160,16 @@ double ExifToolPipe::parseExifGPS(const std::string& dmsStr) const {
     }
 
     try {
-        deg = std::stod(trim(s.substr(0, degPos)));
+        deg = std::stod(utils::trim(s.substr(0, degPos)));
 
-        std::string minStr = trim(s.substr(degPos + 3, minPos - (degPos + 3)));
+        std::string minStr = utils::trim(s.substr(degPos + 3, minPos - (degPos + 3)));
         min = std::stod(minStr);
 
         if (secPos != std::string::npos) {
-            std::string secStr = trim(s.substr(minPos + 1, secPos - (minPos + 1)));
+            std::string secStr = utils::trim(s.substr(minPos + 1, secPos - (minPos + 1)));
             sec = std::stod(secStr);
         } else {
-            std::string remainingStr = trim(s.substr(minPos + 1));
+            std::string remainingStr = utils::trim(s.substr(minPos + 1));
             if (!remainingStr.empty() && std::isdigit(remainingStr[0])) {
                 sec = std::stod(remainingStr);
             }

@@ -1,5 +1,6 @@
 #include "../include/mosaic.h"
 #include "../include/fmatch.h"
+#include "../include/strutils.hpp"
 #include "../external/ctre.hpp"
 #include <cmath>
 #include <opencv4/opencv2/imgcodecs.hpp>
@@ -60,8 +61,9 @@ cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mos
         if (!entry.is_regular_file()) continue;
         std::string filename = entry.path().filename().string();
         if (auto m = ctre::match<R"(tile_(-?\d+)_(-?\d+)\.png)">(filename)) {
-            auto ty = std::stoi(std::string{m.get<1>().to_view()});
-            auto tx = std::stoi(std::string{m.get<2>().to_view()});
+            auto [_, sy, sx] = m;
+            auto ty = utils::to_int(sy.to_view());
+            auto tx = utils::to_int(sx.to_view());
             tiles.emplace_back(tx, ty, entry.path().string());
 
             startX = std::min(startX, tx);
@@ -127,8 +129,9 @@ cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mos
         std::string filename = entry.path().filename().string();
 
         if (auto m = ctre::match<R"(tile_(-?\d+)_(-?\d+)\.png)">(filename)) {
-            auto ty = std::stoi(std::string{m.get<1>().to_view()});
-            auto tx = std::stoi(std::string{m.get<2>().to_view()});
+            auto [_, sy, sx] = m;
+            auto ty = utils::to_int(sy.to_view());
+            auto tx = utils::to_int(sx.to_view());
             tileMap[{tx, ty}] = entry.path().string();
 
             minX = std::min(minX, tx);
@@ -189,8 +192,9 @@ cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mos
         std::string filename = entry.path().filename().string();
         std::smatch match;
         if (auto m = ctre::match<R"(tile_(-?\d+)_(-?\d+)\.png)">(filename)) {
-            auto ty = std::stoi(std::string{m.get<1>().to_view()});
-            auto tx = std::stoi(std::string{m.get<2>().to_view()});
+            auto [_, sy, sx] = m;
+            auto ty = utils::to_int(sy.to_view());
+            auto tx = utils::to_int(sx.to_view());
             tileMap[{tx, ty}] = entry.path().string();
 
             minX = std::min(minX, tx);
@@ -281,7 +285,7 @@ cv::Mat MosaicBuilder::getMosaicAroundTile(TileKey center, int radius, cv::Rect&
             if (!fs::exists(path)) continue;
 
             cv::Mat tile = cv::imread(path, cv::IMREAD_UNCHANGED);
-            if (tile.empty() || !tiles_.isValidTile(path, tile)) continue; // slight optimizations
+            if (tile.empty() || tiles_.isMostlyTransparent(tile, 1)) continue;
 
             int x = (tx - minX) * TILE_SIZE;
             int y = (ty - minY) * TILE_SIZE;
@@ -305,14 +309,17 @@ bool MosaicBuilder::addImageToMosaic(const std::string& newImagePath) {
     double lat = exif.at(EXIFTAGS::GPS_LATITUDE_TAG);
     double lon = exif.at(EXIFTAGS::GPS_LONGITUDE_TAG);
 
-    auto bestTileKeyOpt = tiles_.findClosestTile(lat, lon); // point for optimization. make TileKey& tempClosestKey_ in TileManager?
-    if (!bestTileKeyOpt) return false;
+    TileKey bestKey;
+    if (tiles_.getTempClosestKey() == TileKey{0,0}) { // if tile key is present no need to recalculate
+        auto bestTileKeyOpt = tiles_.findClosestTile(lat, lon);
+        if (!bestTileKeyOpt) return false;
+        bestKey = *bestTileKeyOpt;
+    } else { bestKey = tiles_.getTempClosestKey(); }
 
     int height = exif.at(EXIFTAGS::IMAGE_HEIGHT_TAG);
     int width = exif.at(EXIFTAGS::IMAGE_WIDTH_TAG);
     int tileRadius = std::ceil(std::max(height, width) / float(TILE_SIZE)) / 2;
     
-    TileKey bestKey = *bestTileKeyOpt;
     TileKey localOriginKey{ bestKey.x - tileRadius, bestKey.y - tileRadius };
     
     cv::Rect localBounds;

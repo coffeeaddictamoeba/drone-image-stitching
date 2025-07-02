@@ -43,6 +43,14 @@ struct TileKey {
     bool operator<(const TileKey& other) const {
         return std::tie(y, x) < std::tie(other.y, other.x);
     }
+
+    bool operator==(const TileKey& other) const {
+        return x == other.x && y == other.y;
+    }
+
+    bool operator!=(const TileKey& other) const {
+        return !(*this == other);
+    }
 };
 
 class TileManager {
@@ -51,6 +59,7 @@ public:
 
     std::string getOutputDirectory() const;
     std::string getTilePath(const TileKey& key) const;
+    TileKey getTempClosestKey() const;
 
     void loadGlobalMetadata();
     void saveGlobalMetadata() const;
@@ -67,7 +76,8 @@ public:
 
     void applyImage(const std::string& imagePath, const cv::Mat& homography, bool warpOnce);
 
-    bool isValidTile(const std::string tilePath, cv::Mat& tileMat);
+    bool isMostlyTransparent(const cv::Mat& tileMat, double threshold) const;
+
     double findTileDistance(std::string tilePath, double latToCompare, double lonToCompare);
     std::optional<TileKey> findClosestTile(double lat, double lon);
 
@@ -79,6 +89,7 @@ private:
 
     std::string outputDirectory_;
     ExifToolPipe& exiftool_;
+    TileKey tempClosestKey_{0,0};
 
     // globals for knowing the center for offset calculation
     int globalMinX_ = 0, globalMinY_ = 0;
