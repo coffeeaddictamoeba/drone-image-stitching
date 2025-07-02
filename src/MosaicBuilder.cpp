@@ -1,5 +1,6 @@
 #include "../include/mosaic.h"
 #include "../include/fmatch.h"
+#include "../external/ctre.hpp"
 #include <cmath>
 #include <opencv4/opencv2/imgcodecs.hpp>
 #include <iostream>
@@ -58,11 +59,9 @@ cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mos
     for (const auto& entry : fs::directory_iterator(tileDir)) {
         if (!entry.is_regular_file()) continue;
         std::string filename = entry.path().filename().string();
-
-        std::smatch match;
-        if (std::regex_match(filename, match, TILE_REGEX)) {
-            int ty = std::stoi(match[1]);
-            int tx = std::stoi(match[2]);
+        if (auto m = ctre::match<R"(tile_(-?\d+)_(-?\d+)\.png)">(filename)) {
+            auto ty = std::stoi(std::string{m.get<1>().to_view()});
+            auto tx = std::stoi(std::string{m.get<2>().to_view()});
             tiles.emplace_back(tx, ty, entry.path().string());
 
             startX = std::min(startX, tx);
@@ -127,10 +126,9 @@ cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mos
         if (!entry.is_regular_file()) continue;
         std::string filename = entry.path().filename().string();
 
-        std::smatch match;
-        if (std::regex_match(filename, match, TILE_REGEX)) {
-            int ty = std::stoi(match[1]);
-            int tx = std::stoi(match[2]);
+        if (auto m = ctre::match<R"(tile_(-?\d+)_(-?\d+)\.png)">(filename)) {
+            auto ty = std::stoi(std::string{m.get<1>().to_view()});
+            auto tx = std::stoi(std::string{m.get<2>().to_view()});
             tileMap[{tx, ty}] = entry.path().string();
 
             minX = std::min(minX, tx);
@@ -190,9 +188,9 @@ cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mos
         if (!entry.is_regular_file()) continue;
         std::string filename = entry.path().filename().string();
         std::smatch match;
-        if (std::regex_match(filename, match, TILE_REGEX)) {
-            int ty = std::stoi(match[1]);
-            int tx = std::stoi(match[2]);
+        if (auto m = ctre::match<R"(tile_(-?\d+)_(-?\d+)\.png)">(filename)) {
+            auto ty = std::stoi(std::string{m.get<1>().to_view()});
+            auto tx = std::stoi(std::string{m.get<2>().to_view()});
             tileMap[{tx, ty}] = entry.path().string();
 
             minX = std::min(minX, tx);
@@ -264,167 +262,6 @@ cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mos
     return mosaic;
 }
 
-// not sure (was part of transparency bug fix)
-bool MosaicBuilder::isValidTile(const std::string tilePath, cv::Mat& tileMat) {
-    const int channels = tileMat.channels();
-
-    if (channels == 4) {
-        const uchar* pixel = tileMat.ptr<uchar>(0);
-        const size_t totalPixels = tileMat.total();
-        bool hasVisiblePixel = false;
-
-        for (size_t i = 0; i < totalPixels; ++i) {
-            uchar alpha = pixel[i * 4 + 3];
-            if (alpha > 0) {
-                hasVisiblePixel = true;
-                break;
-            }
-        }
-
-        if (!hasVisiblePixel) {
-            #ifdef DEBUG
-            std::cout << "Skipping fully transparent tile: " << tilePath << "\n";
-            #endif
-            return false;
-        }
-    }
-
-    double minVal = 0, maxVal = 0;
-
-    if (channels == 1) {
-        cv::minMaxLoc(tileMat, &minVal, &maxVal);
-    } else if (channels >= 3) {
-        std::vector<cv::Mat> ch;
-        cv::split(tileMat, ch);
-        cv::Mat intensity = 0.299 * ch[2] + 0.587 * ch[1] + 0.114 * ch[0]; // avoid cvtColor
-        cv::minMaxLoc(intensity, &minVal, &maxVal);
-    }
-
-    if (std::abs(maxVal - minVal) < 1e-3) {
-        #ifdef DEBUG
-        std::cout << "Skipping visually uniform tile: " << tilePath << "\n";
-        #endif
-        return false;
-    }
-    return true;
-}
-
-double MosaicBuilder::findTileDistance(std::string tilePath, double latToCompare, double lonToCompare) {
-    double lat = exiftool_.parseExifGPS(exiftool_.getExifTag(tilePath, EXIFTAGS::GPS_LATITUDE_TAG));
-    double lon = exiftool_.parseExifGPS(exiftool_.getExifTag(tilePath, EXIFTAGS::GPS_LONGITUDE_TAG));
-
-    double dLat = (lat - latToCompare) * DEG_TO_RAD;
-    double dLon = (lon - lonToCompare) * DEG_TO_RAD;
-
-    // Haversine formula
-    double a = std::sin(dLat/2) * std::sin(dLat/2) + 
-               std::cos(latToCompare * DEG_TO_RAD) * std::cos(lat * DEG_TO_RAD) * 
-               std::sin(dLon/2) * std::sin(dLon/2);
-
-    double c = 2 * std::atan2(std::sqrt(a), std::sqrt(1-a)); // central angle
-
-    return R_M * c; // distance in meters
-}
-
-// OBSOLETE
-// function for searching best tile for feature matching. works well but quite unnecessary for now
-std::optional<TileKey> MosaicBuilder::findBestMatchingTileInRadius(const cv::Mat& image, const TileKey& centerTile, int radius) {
-    const int maxThreads = 3; // test with other amounts
-    std::vector<std::future<std::pair<TileKey, int>>> futures;
-
-    for (int dy = -radius; dy <= radius; ++dy) {
-        for (int dx = -radius; dx <= radius; ++dx) {
-            TileKey candidate{centerTile.x + dx, centerTile.y + dy};
-            std::string tilePath = tiles_.getTilePath(candidate);
-            #ifdef DEBUG
-            std::cout << "Evaluating tile " << tilePath << '\n';
-            #endif
-
-            //if (!fs::exists(tilePath) || !isValidTile(tilePath)) continue;
-
-            futures.emplace_back(std::async(std::launch::async, [=]() -> std::pair<TileKey, int> {
-                FeatureMatcher matcher{exiftool_, "SIFT"};
-                cv::Mat H;
-                std::vector<cv::DMatch> matches;
-
-                ImageMatrix imgNew{image, "New Image"};
-                ImageMatrix imgTile = toImageMatrix(tilePath);
-                if (!alignImages(imgNew, imgTile, H)) return {centerTile, 0}; // fix when the best gps tile returns no matches
-
-                bool success = matcher.computeHomography(imgNew, imgTile, H, matches);
-                return {candidate, success ? static_cast<int>(matches.size()) : 0};
-            }));
-
-            if ((int)futures.size() >= maxThreads * 2) break;
-        }
-    }
-
-    int bestMatchCount = -1;
-    std::optional<TileKey> bestTile;
-    for (auto& fut : futures) {
-        auto [tile, count] = fut.get();
-        if (count > bestMatchCount) {
-            bestMatchCount = count;
-            bestTile = tile;
-        }
-    }
-
-    if (bestTile) {
-        #ifdef DEBUG
-        std::cout << "Best tile based on feature match: " << tiles_.getTilePath(*bestTile) << " with " << bestMatchCount << " good matches.\n";
-        #endif
-    } else {
-        #ifdef DEBUG
-        std::cerr << "[WARN] No tile produced valid feature matches.\n";
-        #endif
-    }
-
-    return bestTile;
-}
-
-std::optional<TileKey> MosaicBuilder::findClosestTile(double lat, double lon) {
-    if (lat == 0.0 || lon == 0.0) {
-        #ifdef DEBUG
-        std::cerr << "[WARN] Image has no valid GPS coordinates.\n";
-        #endif
-        return std::nullopt;
-    }
-
-    double bestDist = DBL_MAX;
-    std::optional<TileKey> bestKey;
-
-    for (const auto& entry : fs::directory_iterator(tiles_.getOutputDirectory())) {
-        std::string filename = entry.path().filename().string();
-        std::smatch match;
-        if (!std::regex_match(filename, match, TILE_REGEX)) continue;
-
-        int ty = std::stoi(match[1]);
-        int tx = std::stoi(match[2]);
-        std::string tilePath = entry.path().string();
-
-        cv::Mat tileMat = cv::imread(tilePath, cv::IMREAD_UNCHANGED);
-        if (tileMat.empty() || !isValidTile(tilePath, tileMat)) continue;
-
-        double dist = findTileDistance(tilePath, lat, lon);
-        if (dist < bestDist) {
-            bestDist = dist;
-            bestKey = TileKey{tx, ty};
-        }
-    }
-
-    if (!bestKey) {
-        #ifdef DEBUG
-        std::cerr << "[ERROR] No suitable tile found.\n";
-        #endif
-        return std::nullopt;
-    }
-
-    #ifdef DEBUG
-    std::cout << "Tile candidate (GPS closest): " << tiles_.getTilePath(*bestKey) << '\n';
-    #endif
-    return bestKey;
-}
-
 cv::Mat MosaicBuilder::getMosaicAroundTile(TileKey center, int radius, cv::Rect& outBounds) {
     int minX = center.x - radius;
     int maxX = center.x + radius;
@@ -444,7 +281,7 @@ cv::Mat MosaicBuilder::getMosaicAroundTile(TileKey center, int radius, cv::Rect&
             if (!fs::exists(path)) continue;
 
             cv::Mat tile = cv::imread(path, cv::IMREAD_UNCHANGED);
-            if (tile.empty() || !isValidTile(path, tile)) continue; // slight optimizations
+            if (tile.empty() || !tiles_.isValidTile(path, tile)) continue; // slight optimizations
 
             int x = (tx - minX) * TILE_SIZE;
             int y = (ty - minY) * TILE_SIZE;
@@ -457,16 +294,18 @@ cv::Mat MosaicBuilder::getMosaicAroundTile(TileKey center, int radius, cv::Rect&
 bool MosaicBuilder::addImageToMosaic(const std::string& newImagePath) {
     std::vector<std::string> sharedTags = { 
                 EXIFTAGS::IMAGE_WIDTH_TAG, 
-                EXIFTAGS::IMAGE_HEIGHT_TAG
+                EXIFTAGS::IMAGE_HEIGHT_TAG,
+                EXIFTAGS::GPS_LATITUDE_TAG,
+                EXIFTAGS::GPS_LONGITUDE_TAG
             };
 
     auto rawExif = exiftool_.getExifTags(newImagePath, sharedTags);
     auto exif = exiftool_.parseExifValuesToNumbers(rawExif);
 
-    double lat = exiftool_.parseExifGPS(exiftool_.getExifTag(newImagePath, EXIFTAGS::GPS_LATITUDE_TAG));
-    double lon = exiftool_.parseExifGPS(exiftool_.getExifTag(newImagePath, EXIFTAGS::GPS_LONGITUDE_TAG));
+    double lat = exif.at(EXIFTAGS::GPS_LATITUDE_TAG);
+    double lon = exif.at(EXIFTAGS::GPS_LONGITUDE_TAG);
 
-    auto bestTileKeyOpt = findClosestTile(lat, lon);
+    auto bestTileKeyOpt = tiles_.findClosestTile(lat, lon); // point for optimization. make TileKey& tempClosestKey_ in TileManager?
     if (!bestTileKeyOpt) return false;
 
     int height = exif.at(EXIFTAGS::IMAGE_HEIGHT_TAG);

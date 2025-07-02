@@ -13,11 +13,16 @@
 
 constexpr int TILE_SIZE = 512;
 constexpr int FEATHERING_SIZE = 50; // smoothness value
-constexpr double M_PER_DEGREE_LATITUDE = 111320.0;
-constexpr double DEG_TO_RAD = M_PI / 180.0;
-constexpr double R_M = 6371000.0; // Earth radius in meters
 
-inline const std::regex TILE_REGEX(R"(tile_(\-?\d+)\_(\-?\d+)\.png)"); // searches for pattern "tile_y_x.png"
+// more robust GPS constants
+constexpr double WGS84_A = 6378137.0; // m
+constexpr double WGS84_INV_FLATTENING = 298.257223563;
+constexpr double WGS84_FLATTENING = 1.0 / WGS84_INV_FLATTENING;
+constexpr double WGS84_B = WGS84_A * (1.0 - WGS84_FLATTENING); // m
+constexpr double WGS84_E_SQUARED = WGS84_FLATTENING * (2.0 - WGS84_FLATTENING);
+
+constexpr double DEG_TO_RAD = M_PI / 180.0;
+constexpr double RAD_TO_DEG = 180.0 / M_PI;
 
 constexpr const char* COORDS_METADATA = "coords_metadata.txt";
 
@@ -57,10 +62,14 @@ public:
     cv::Mat computeGlobalHomography(const TileKey& localOriginKey, const cv::Mat& localHomography);
 
     double estimateGSD(const std::map<std::string, double> exif) const;
-    std::pair<double, double> calculateTileGPS(const TileKey& tileKey, const TileKey& centerTile, double gsd) const;
+    std::pair<double, double> calculateTileGPS(const TileKey& tileKey, const TileKey& centerTile, double centerLat, double centerLon, double gsd) const;
     void assignMetadata(const std::string imagePath, double lat, double lon, double alt, double flen, double gpsDir) const;
 
     void applyImage(const std::string& imagePath, const cv::Mat& homography, bool warpOnce);
+
+    bool isValidTile(const std::string tilePath, cv::Mat& tileMat);
+    double findTileDistance(std::string tilePath, double latToCompare, double lonToCompare);
+    std::optional<TileKey> findClosestTile(double lat, double lon);
 
 private:
     void blendOntoTile(cv::Mat& tile, const cv::Mat& patch, const cv::Rect& roi, int featheringPx);
@@ -108,9 +117,5 @@ private:
     TileManager& tiles_;
     cv::Mat homography_;
 
-    bool isValidTile(const std::string tilePath, cv::Mat& tileMat);
-    double findTileDistance(std::string tilePath, double latToCompare, double lonToCompare);
-    std::optional<TileKey> findClosestTile(double lat, double lon);
     cv::Mat getMosaicAroundTile(TileKey center, int radius, cv::Rect& outBounds);
-    std::optional<TileKey> findBestMatchingTileInRadius(const cv::Mat& image, const TileKey& centerTile, int radius);
 };

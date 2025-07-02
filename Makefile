@@ -1,5 +1,5 @@
 CXX := g++
-CXXFLAGS := -std=c++17 -Wall -Wextra -O2 -DDEBUG
+CXXFLAGS := -std=c++20 -Wall -Wextra -O2 -DDEBUG -Iexternal/ctre
 PKGCONFIG := pkg-config
 LIBS := $(shell $(PKGCONFIG) --cflags --libs opencv4)
 

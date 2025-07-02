@@ -1,5 +1,6 @@
 #include "../include/mosaic.h"
 #include "../include/fmatch.h"
+#include "../external/ctre.hpp" // for compile-time regex
 #include <cmath>
 #include <opencv4/opencv2/imgcodecs.hpp>
 #include <iostream>
@@ -79,44 +80,53 @@ TileKey TileManager::getGlobalCenterTileKey() const {
     };
 }
 
-std::pair<double, double> TileManager::calculateTileGPS(const TileKey& tileKey, const TileKey& centerTile, double gsd) const {
-    int dx = centerTile.x - tileKey.x; // highly questionable, but who cares if it works
-    int dy = centerTile.y - tileKey.y; // if this works it means that x-axis at some point is inverted. it was the case even before globalHeading_.
+std::pair<double, double> TileManager::calculateTileGPS(const TileKey& tileKey, const TileKey& centerKey, double centerLat, double centerLon, double gsd) const {
+    int dxTiles = centerKey.x - tileKey.x;
+    int dyTiles = centerKey.y - tileKey.y;
 
-    double offsetX_m = static_cast<double>(dx) * TILE_SIZE * gsd;
-    double offsetY_m = static_cast<double>(dy) * TILE_SIZE * gsd;
+    // convert tile unit offset to meters.
+    double offsetXmMosaic = static_cast<double>(dxTiles) * TILE_SIZE * gsd;
+    double offsetYmMosaic = static_cast<double>(dyTiles) * TILE_SIZE * gsd;
     
-    double heading_rad = globalHeading_ * M_PI / 180.0;
+    double headingRad = globalHeading_ * DEG_TO_RAD;
 
-    double cos_heading = std::cos(heading_rad);
-    double sin_heading = std::sin(heading_rad);
+    double cosHeading = std::cos(headingRad);
+    double sinHeading = std::sin(headingRad);
 
-    double true_east_offset_m = (offsetX_m * cos_heading) + (-offsetY_m * sin_heading);
-    double true_north_offset_m = (-offsetX_m * sin_heading) + (-offsetY_m * cos_heading);
+    double trueEastOffsetM = (offsetXmMosaic * cosHeading) + (-offsetYmMosaic * sinHeading);
+    double trueNorthOffsetM = (offsetXmMosaic * sinHeading) + (-offsetYmMosaic * cosHeading);
     
-    double metersPerDegLon = M_PER_DEGREE_LATITUDE * std::cos(mosaicOriginLat_ * M_PI / 180.0);
+    double centerLatRad = centerLat * DEG_TO_RAD;
+    double N = WGS84_A / std::sqrt(1.0 - WGS84_E_SQUARED * std::sin(centerLatRad) * std::sin(centerLatRad));
 
-    double lat = mosaicOriginLat_ + (true_north_offset_m / M_PER_DEGREE_LATITUDE) - 0.001; // why??
-    double lon = mosaicOriginLon_ + (true_east_offset_m / metersPerDegLon) - 0.001;
+    // N * cos(latitude) * (PI / 180)
+    double metersAtCenterRefLon = N * std::cos(centerLatRad) * DEG_TO_RAD; 
+    
+    // M = a(1-e^2) / (1-e^2*sin^2(phi))^(3/2)
+    double M = WGS84_A * (1.0 - WGS84_E_SQUARED) / std::pow(1.0 - WGS84_E_SQUARED * std::sin(centerLatRad) * std::sin(centerLatRad), 1.5);
+    double metersAtCenterLat = M * DEG_TO_RAD;
+
+    double lat = centerLat + (trueNorthOffsetM / metersAtCenterLat);
+    double lon = centerLon + (trueEastOffsetM / metersAtCenterRefLon);
 
     #ifdef DEBUG
-    std::cout << std::fixed << std::setprecision(10); // Set precision for all subsequent double outputs
-    std::cout << "DEBUG: calculateTileGPS for TileKey (" << tileKey.x << "," << tileKey.y << "):\n";
-    std::cout << "  centerLat=" << mosaicOriginLat_ << ", centerLon=" << mosaicOriginLon_ << ", gsd=" << gsd << ", globalHeading_=" << globalHeading_ << "\n";
-    std::cout << "  offsetX_m (mosaic)=" << offsetX_m << ", offsetY_m (mosaic)=" << offsetY_m << "\n";
-    std::cout << "  true_east_offset_m=" << true_east_offset_m << ", true_north_offset_m=" << true_north_offset_m << "\n";
-    std::cout << "  Calculated Lat=" << lat << ", Lon=" << lon << "\n";
+    std::cout << std::fixed << std::setprecision(10); 
+    std::cout << "DEBUG: calculateTileGPS for TileKey (" << tileKey.x << "," << tileKey.y << ") with Ref=(" << centerKey.x << "," << centerKey.y << ") and RefGPS=(" << centerLat << "," << centerLon << "):\n"; 
+    std::cout << "  dxTiles=" << dxTiles << ", dyTiles=" << dyTiles << "\n";
+    std::cout << "  offsetXmMosaic=" << offsetXmMosaic << ", offsetYmMosaic=" << offsetYmMosaic << "\n";
+    std::cout << "  trueEastOffsetM=" << trueEastOffsetM << ", trueNorthOffsetM=" << trueNorthOffsetM << "\n";
+    std::cout << "  Calculated Lat=" << lat << ", Lon=" << lon << "\n"; 
     #endif
 
-    return {lat, lon};
+    return {lat, lon}; 
 }
 
 double TileManager::estimateGSD(const std::map<std::string, double> exif) const {
     if (exif.count(EXIFTAGS::FOCAL_LENGTH_TAG) && exif.count(EXIFTAGS::IMAGE_WIDTH_TAG) && exif.at(EXIFTAGS::FOCAL_LENGTH_TAG) != 0.0 && exif.at(EXIFTAGS::IMAGE_WIDTH_TAG) != 0.0) {
         double alt = exif.count(EXIFTAGS::GPS_ALTITUDE_TAG) ? exif.at(EXIFTAGS::GPS_ALTITUDE_TAG) : 0.0;
         double flen = exif.at(EXIFTAGS::FOCAL_LENGTH_TAG);
-        double width_px = exif.at(EXIFTAGS::IMAGE_WIDTH_TAG);
-        return (3.674 * alt) / (flen * width_px);
+        double width = exif.at(EXIFTAGS::IMAGE_WIDTH_TAG); // px
+        return (3.674 * alt) / (flen * width);
     }
     return 0.0;
 }
@@ -149,9 +159,9 @@ void TileManager::saveTile(const TileKey& key, const cv::Mat& tile, const double
     assignMetadata(path, 
         lat, 
         lon, 
-        exif.at(EXIFTAGS::GPS_ALTITUDE_TAG), 
-        exif.at(EXIFTAGS::FOCAL_LENGTH_TAG), 
-        exif.at(EXIFTAGS::GPS_IMG_DIRECTION_TAG) // it is not the same as globalHeading_. this is made for tile to repeat the source image metadata
+        exif.count(EXIFTAGS::GPS_ALTITUDE_TAG) ? exif.at(EXIFTAGS::GPS_ALTITUDE_TAG) : 0.0, 
+        exif.count(EXIFTAGS::FOCAL_LENGTH_TAG) ? exif.at(EXIFTAGS::FOCAL_LENGTH_TAG) : 0.0, 
+        exif.count(EXIFTAGS::GPS_IMG_DIRECTION_TAG) ? exif.at(EXIFTAGS::GPS_IMG_DIRECTION_TAG) : 0.0
     );
 }
 
@@ -186,6 +196,108 @@ cv::Mat TileManager::computeGlobalHomography(const TileKey& localOriginKey, cons
     return offsetMat * localHomography;
 }
 
+bool TileManager::isValidTile(const std::string tilePath, cv::Mat& tileMat) {
+    const int channels = tileMat.channels();
+
+    if (channels == 4) {
+        const uchar* pixel = tileMat.ptr<uchar>(0);
+        const size_t totalPixels = tileMat.total();
+        bool hasVisiblePixel = false;
+
+        for (size_t i = 0; i < totalPixels; ++i) {
+            uchar alpha = pixel[i * 4 + 3];
+            if (alpha > 0) {
+                hasVisiblePixel = true;
+                break;
+            }
+        }
+
+        if (!hasVisiblePixel) {
+            #ifdef DEBUG
+            std::cout << "Skipping fully transparent tile: " << tilePath << "\n";
+            #endif
+            return false;
+        }
+    }
+
+    double minVal = 0, maxVal = 0;
+    if (channels == 1) {
+        cv::minMaxLoc(tileMat, &minVal, &maxVal);
+    } else if (channels >= 3) {
+        std::vector<cv::Mat> ch;
+        cv::split(tileMat, ch);
+        cv::Mat intensity = 0.299 * ch[2] + 0.587 * ch[1] + 0.114 * ch[0]; // avoid cvtColor
+        cv::minMaxLoc(intensity, &minVal, &maxVal);
+    }
+
+    if (std::abs(maxVal - minVal) < 1e-3) {
+        #ifdef DEBUG
+        std::cout << "Skipping visually uniform tile: " << tilePath << "\n";
+        #endif
+        return false;
+    }
+    return true;
+}
+
+double TileManager::findTileDistance(std::string tilePath, double latToCompare, double lonToCompare) {
+    double lat = exiftool_.parseExifGPS(exiftool_.getExifTag(tilePath, EXIFTAGS::GPS_LATITUDE_TAG));
+    double lon = exiftool_.parseExifGPS(exiftool_.getExifTag(tilePath, EXIFTAGS::GPS_LONGITUDE_TAG));
+
+    double dLat = (lat - latToCompare) * DEG_TO_RAD;
+    double dLon = (lon - lonToCompare) * DEG_TO_RAD;
+
+    // Haversine formula
+    double a = std::sin(dLat/2) * std::sin(dLat/2) + 
+               std::cos(latToCompare * DEG_TO_RAD) * std::cos(lat * DEG_TO_RAD) * 
+               std::sin(dLon/2) * std::sin(dLon/2);
+
+    double c = 2 * std::atan2(std::sqrt(a), std::sqrt(1-a)); // central angle
+
+    return WGS84_A * c; // distance in meters
+}
+
+std::optional<TileKey> TileManager::findClosestTile(double lat, double lon) {
+    if (lat == 0.0 || lon == 0.0) {
+        #ifdef DEBUG
+        std::cerr << "[WARN] Image has no valid GPS coordinates.\n";
+        #endif
+        return std::nullopt;
+    }
+
+    double bestDist = DBL_MAX;
+    std::optional<TileKey> bestKey;
+
+    for (const auto& entry : fs::directory_iterator(getOutputDirectory())) {
+        const std::string filename = entry.path().filename().string();
+        if (auto m = ctre::match<R"(tile_(-?\d+)_(-?\d+)\.png)">(filename)) { // searches for pattern "tile_y_x.png"
+            auto ty = std::stoi(std::string{m.get<1>().to_view()});
+            auto tx = std::stoi(std::string{m.get<2>().to_view()});
+            std::string tilePath = entry.path().string();
+    
+            cv::Mat tileMat = cv::imread(tilePath, cv::IMREAD_UNCHANGED);
+            if (tileMat.empty() || !isValidTile(tilePath, tileMat)) continue;
+    
+            double dist = findTileDistance(tilePath, lat, lon);
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestKey = TileKey{tx, ty};
+            }
+        }
+    }
+
+    if (!bestKey) {
+        #ifdef DEBUG
+        std::cerr << "[ERROR] No suitable tile found.\n";
+        #endif
+        return std::nullopt;
+    }
+
+    #ifdef DEBUG
+    std::cout << "Tile candidate (GPS closest): " << getTilePath(*bestKey) << '\n';
+    #endif
+    return bestKey;
+}
+
 void TileManager::blendOntoTile(cv::Mat& tile, const cv::Mat& patch, const cv::Rect& roi, int featheringPx) {
     if (patch.empty() || patch.channels() != 4 || tile.empty() || tile.channels() != 4) {
         #ifdef DEBUG
@@ -194,68 +306,72 @@ void TileManager::blendOntoTile(cv::Mat& tile, const cv::Mat& patch, const cv::R
         return;
     }
     
-    cv::Rect valid_roi = roi & cv::Rect(0, 0, tile.cols, tile.rows);
-    if (valid_roi.empty() || valid_roi.width != patch.cols || valid_roi.height != patch.rows) {
+    cv::Rect validROI = roi & cv::Rect(0, 0, tile.cols, tile.rows);
+    if (validROI.empty() || validROI.width != patch.cols || validROI.height != patch.rows) {
         #ifdef DEBUG
         std::cerr << "[WARN] blendOntoTile: ROI or patch size mismatch or invalid. Doing simple copy.\n";
         #endif
-        //patch.copyTo(tile(roi), patch_channels[3]); 
+        if (patch.channels() == 4) {
+            std::vector<cv::Mat> patchChannels(4);
+            cv::split(patch, patchChannels);
+            patch.copyTo(tile(roi), patchChannels[3]);
+        } else {
+            patch.copyTo(tile(roi)); 
+        }
         return;
     }
 
-    std::vector<cv::Mat> tile_channels(4);
-    std::vector<cv::Mat> patch_channels(4);
-    cv::split(tile(valid_roi), tile_channels);
-    cv::split(patch, patch_channels);
+    std::vector<cv::Mat> tileChannels(4);
+    std::vector<cv::Mat> patchChannels(4);
+    cv::split(tile(validROI), tileChannels);
+    cv::split(patch, patchChannels);
 
-    cv::Mat tile_alpha = tile_channels[3];
-    cv::Mat patch_alpha = patch_channels[3];
+    cv::Mat tileAlpha = tileChannels[3];
+    cv::Mat patchAlpha = patchChannels[3];
 
-    cv::Mat blend_weight(patch.size(), CV_32FC1);
+    cv::Mat blendWeight(patch.size(), CV_32FC1);
 
-    cv::Mat patch_opaque_mask = patch_alpha > 0;
-    cv::Mat dist_transform;
-    cv::distanceTransform(patch_opaque_mask, dist_transform, cv::DIST_L2, cv::DIST_MASK_PRECISE);
+    cv::Mat patchOpaqueMask = patchAlpha > 0;
+    cv::Mat distTransform;
+    cv::distanceTransform(patchOpaqueMask, distTransform, cv::DIST_L2, cv::DIST_MASK_PRECISE);
 
     for (int r = 0; r < patch.rows; ++r) {
         for (int c = 0; c < patch.cols; ++c) {
-            float dist = dist_transform.at<float>(r, c);
-            blend_weight.at<float>(r, c) = std::min(1.0f, dist / static_cast<float>(featheringPx));
+            float dist = distTransform.at<float>(r, c);
+            blendWeight.at<float>(r, c) = std::min(1.0f, dist / static_cast<float>(featheringPx));
         }
     }
 
     for (int r = 0; r < patch.rows; ++r) {
         for (int c = 0; c < patch.cols; ++c) {
-            unsigned char new_alpha_raw = patch_alpha.at<unsigned char>(r, c);
-            unsigned char existing_alpha_raw = tile_alpha.at<unsigned char>(r, c);
+            unsigned char newAlphaRaw = patchAlpha.at<unsigned char>(r, c);
+            unsigned char existingAlphaRaw = tileAlpha.at<unsigned char>(r, c);
 
-            float weight = blend_weight.at<float>(r, c);
+            float weight = blendWeight.at<float>(r, c);
 
-            double new_effective_alpha_norm = (static_cast<double>(new_alpha_raw) / 255.0) * weight;
-            double existing_alpha_norm = static_cast<double>(existing_alpha_raw) / 255.0;
+            double newEffectiveAlphaNorm = (static_cast<double>(newAlphaRaw) / 255.0) * weight;
+            double existingAlphaNorm = static_cast<double>(existingAlphaRaw) / 255.0;
 
-            double final_alpha_norm = new_effective_alpha_norm + existing_alpha_norm * (1.0 - new_effective_alpha_norm);
+            double finalAlphaNorm = newEffectiveAlphaNorm + existingAlphaNorm * (1.0 - newEffectiveAlphaNorm);
 
-            if (final_alpha_norm > 1e-6) {
+            if (finalAlphaNorm > 1e-6) {
                 for (int k = 0; k < 3; ++k) { // B, G, R channels
-                    double new_color_val = static_cast<double>(patch_channels[k].at<unsigned char>(r, c));
-                    double existing_color_val = static_cast<double>(tile_channels[k].at<unsigned char>(r, c));
+                    double newColorVal = static_cast<double>(patchChannels[k].at<unsigned char>(r, c));
+                    double existingColorVal = static_cast<double>(tileChannels[k].at<unsigned char>(r, c));
 
-                    double blended_color_val = (new_color_val * new_effective_alpha_norm + 
-                                                existing_color_val * existing_alpha_norm * (1.0 - new_effective_alpha_norm)) / final_alpha_norm;
-                    tile_channels[k].at<unsigned char>(r, c) = static_cast<unsigned char>(std::min(255.0, std::max(0.0, blended_color_val)));
+                    double blendedColorVal = (newColorVal * newEffectiveAlphaNorm + existingColorVal * existingAlphaNorm * (1.0 - newEffectiveAlphaNorm)) / finalAlphaNorm;
+                    tileChannels[k].at<unsigned char>(r, c) = static_cast<unsigned char>(std::min(255.0, std::max(0.0, blendedColorVal)));
                 }
-                tile_channels[3].at<unsigned char>(r, c) = static_cast<unsigned char>(std::min(255.0, std::max(0.0, final_alpha_norm * 255.0)));
+                tileChannels[3].at<unsigned char>(r, c) = static_cast<unsigned char>(std::min(255.0, std::max(0.0, finalAlphaNorm * 255.0)));
             } else {
                 for (int k = 0; k < 3; ++k) {
-                    tile_channels[k].at<unsigned char>(r, c) = 0;
+                    tileChannels[k].at<unsigned char>(r, c) = 0;
                 }
-                tile_channels[3].at<unsigned char>(r, c) = 0;
+                tileChannels[3].at<unsigned char>(r, c) = 0;
             }
         }
     }
-    
-    cv::merge(tile_channels, tile(valid_roi));
+    cv::merge(tileChannels, tile(validROI));
 }
 
 void TileManager::applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homography, double gsd, std::map<std::string, double> exif) {
@@ -293,6 +409,11 @@ void TileManager::applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homograp
     int tx0 = std::floor(minX / TILE_SIZE), ty0 = std::floor(minY / TILE_SIZE);
     int tx1 = std::floor(maxX / TILE_SIZE), ty1 = std::floor(maxY / TILE_SIZE);
 
+    // now image center depends on the tile that was chosen by GPS
+    // think about optimizing this logic in terms of not finding the same bestKey twice (in MosaicBuilder and TileManager)
+    auto closestTile = findClosestTile(exif.at(EXIFTAGS::GPS_LATITUDE_TAG), exif.at(EXIFTAGS::GPS_LONGITUDE_TAG));
+    TileKey bestKey = *closestTile;
+
     for (int ty = ty0; ty <= ty1; ++ty) {
         for (int tx = tx0; tx <= tx1; ++tx) {
             TileKey key{tx, ty};
@@ -308,10 +429,10 @@ void TileManager::applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homograp
             cv::Mat tile = loadTile(key);
             cv::Mat patch = warpCanvas(localTileRect);
 
-            cv::Rect patch_roi_on_tile(0, 0, patch.cols, patch.rows); 
-            blendOntoTile(tile, patch, patch_roi_on_tile, FEATHERING_SIZE);
+            cv::Rect patchTileROI(0, 0, patch.cols, patch.rows); 
+            blendOntoTile(tile, patch, patchTileROI, FEATHERING_SIZE);
 
-            auto [tileLat, tileLon] = calculateTileGPS(key, mosaicCenterOrigin_, gsd);
+            auto [tileLat, tileLon] = calculateTileGPS(key, bestKey, exif.at(EXIFTAGS::GPS_LATITUDE_TAG), exif.at(EXIFTAGS::GPS_LONGITUDE_TAG), gsd);
             saveTile(key, tile, tileLat, tileLon, exif);
             updateGlobalBounds(key);
         }
@@ -349,10 +470,10 @@ void TileManager::applyImagePerTile(const cv::Mat& img, const cv::Mat& homograph
             cv::Mat patch = warpTileRegion(img, homography, tileRect);
             if (patch.empty()) continue;
 
-            cv::Rect patch_roi_on_tile(0, 0, patch.cols, patch.rows); 
-            blendOntoTile(tile, patch, patch_roi_on_tile, FEATHERING_SIZE);
+            cv::Rect patchTileROI(0, 0, patch.cols, patch.rows); 
+            blendOntoTile(tile, patch, patchTileROI, FEATHERING_SIZE);
 
-            auto [tileLat, tileLon] = calculateTileGPS(key, mosaicCenterOrigin_, gsd);
+            auto [tileLat, tileLon] = calculateTileGPS(key, mosaicCenterOrigin_, mosaicOriginLat_, mosaicOriginLon_, gsd);
             saveTile(key, tile, tileLat, tileLon, exif);
             updateGlobalBounds(key);
         }
