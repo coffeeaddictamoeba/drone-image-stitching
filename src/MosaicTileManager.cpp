@@ -218,10 +218,7 @@ cv::Mat TileManager::warpTileRegion(const cv::Mat& input, const cv::Mat& H, cons
 
 cv::Mat TileManager::computeGlobalHomography(const TileKey& localOriginKey, const cv::Mat& localHomography) {
     double offsetX = localOriginKey.x * TILE_SIZE;
-    double offsetY = localOriginKey.y * TILE_SIZE
-    #ifdef DEBUG
-    std::cout << "DEBUG: Saved tile " << path << " (image updated, EXISTING GPS retained).\n";
-    #endif;
+    double offsetY = localOriginKey.y * TILE_SIZE;
 
     cv::Mat offsetMat = (cv::Mat_<double>(3, 3) <<
         1, 0, offsetX,
