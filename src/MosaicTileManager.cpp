@@ -159,15 +159,42 @@ void TileManager::assignMetadata(const std::string imagePath, const double lat, 
 
 void TileManager::saveTile(const TileKey& key, const cv::Mat& tile, const double lat, const double lon, const std::map<std::string, double>& exif) const {
     std::string path = getTilePath(key);
+    
+    bool tileExists = fs::exists(path);
+    bool hasExistingGps = false;
+    std::map<std::string, double> parsedExistingExif;
+    if (tileExists) {
+        std::vector<std::string> existingTags = {EXIFTAGS::GPS_LATITUDE_TAG, EXIFTAGS::GPS_LONGITUDE_TAG, EXIFTAGS::GPS_ALTITUDE_TAG, EXIFTAGS::FOCAL_LENGTH_TAG, EXIFTAGS::GPS_IMG_DIRECTION_TAG};
+        auto rawExistingExif = exiftool_.getExifTags(path, existingTags);
+        parsedExistingExif = exiftool_.parseExifValuesToNumbers(rawExistingExif);
+        if (parsedExistingExif.count(EXIFTAGS::GPS_LATITUDE_TAG) && parsedExistingExif.count(EXIFTAGS::GPS_LONGITUDE_TAG)) {
+            hasExistingGps = true;
+        }
+    }
+    
     cv::imwrite(path, tile);
 
-    assignMetadata(path, 
-        lat, 
-        lon, 
-        exif.count(EXIFTAGS::GPS_ALTITUDE_TAG) ? exif.at(EXIFTAGS::GPS_ALTITUDE_TAG) : 0.0, 
-        exif.count(EXIFTAGS::FOCAL_LENGTH_TAG) ? exif.at(EXIFTAGS::FOCAL_LENGTH_TAG) : 0.0, 
-        exif.count(EXIFTAGS::GPS_IMG_DIRECTION_TAG) ? exif.at(EXIFTAGS::GPS_IMG_DIRECTION_TAG) : 0.0
-    );
+    if (!hasExistingGps) {
+        assignMetadata(path, 
+            lat, 
+            lon, 
+            exif.count(EXIFTAGS::GPS_ALTITUDE_TAG) ? exif.at(EXIFTAGS::GPS_ALTITUDE_TAG) : 0.0, 
+            exif.count(EXIFTAGS::FOCAL_LENGTH_TAG) ? exif.at(EXIFTAGS::FOCAL_LENGTH_TAG) : 0.0, 
+            exif.count(EXIFTAGS::GPS_IMG_DIRECTION_TAG) ? exif.at(EXIFTAGS::GPS_IMG_DIRECTION_TAG) : 0.0
+        );
+        #ifdef DEBUG
+        std::cout << "DEBUG: Saved tile " << path << " with NEW GPS Lat=" << lat << ", Lon=" << lon 
+                  << ", GPSImgDirection=" << (exif.count(EXIFTAGS::GPS_IMG_DIRECTION_TAG) ? exif.at(EXIFTAGS::GPS_IMG_DIRECTION_TAG) : 0.0) << " (image written, metadata assigned)\n";
+        #endif
+    } else {
+        assignMetadata(path, 
+            parsedExistingExif.at(EXIFTAGS::GPS_LATITUDE_TAG), 
+            parsedExistingExif.at(EXIFTAGS::GPS_LONGITUDE_TAG),
+            parsedExistingExif.at(EXIFTAGS::GPS_ALTITUDE_TAG), 
+            parsedExistingExif.at(EXIFTAGS::FOCAL_LENGTH_TAG), 
+            parsedExistingExif.at(EXIFTAGS::GPS_IMG_DIRECTION_TAG)
+        );
+    }
 }
 
 cv::Mat TileManager::warpTileRegion(const cv::Mat& input, const cv::Mat& H, const cv::Rect& tileRect) const {
@@ -191,7 +218,10 @@ cv::Mat TileManager::warpTileRegion(const cv::Mat& input, const cv::Mat& H, cons
 
 cv::Mat TileManager::computeGlobalHomography(const TileKey& localOriginKey, const cv::Mat& localHomography) {
     double offsetX = localOriginKey.x * TILE_SIZE;
-    double offsetY = localOriginKey.y * TILE_SIZE;
+    double offsetY = localOriginKey.y * TILE_SIZE
+    #ifdef DEBUG
+    std::cout << "DEBUG: Saved tile " << path << " (image updated, EXISTING GPS retained).\n";
+    #endif;
 
     cv::Mat offsetMat = (cv::Mat_<double>(3, 3) <<
         1, 0, offsetX,

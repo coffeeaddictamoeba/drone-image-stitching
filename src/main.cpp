@@ -16,8 +16,10 @@ const std::string resultDir = "results";
 const std::string tilesDir = "tiles";
 
 // need to think about better alternative than just creating new mosaics when images do not align
-// AND FIX THE INITIAL ALIGN IMG TRANSPARENCY BUG
-// need better multithreading option. experiment with bs or tbb libs
+// need better multithreading option. experiment with bs or tbb libs?
+// think more about alignment, maybe add some pitch-roll-yaw metadata? (however it is not present on my test image set) ->
+// -> so go to odm datasets and try to align its images
+// MAKE AN OPTION FOR AUTOMATIC IMG LOADING
 
 std::string makeMosaicDir(const std::string& baseDir, int idx) {
     std::string dir = baseDir + "/" + baseDir + "_" + std::to_string(idx);
