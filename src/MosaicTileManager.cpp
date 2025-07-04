@@ -16,22 +16,6 @@ TileManager::TileManager(const std::string& outputDir, ExifToolPipe& tool): outp
     std::filesystem::create_directories(outputDirectory_);
 }
 
-TileKey TileManager::getTileKeyForPoint(int x, int y) const {
-    return { x / TILE_SIZE, y / TILE_SIZE };
-}
-
-std::string TileManager::getOutputDirectory() const {
-    return outputDirectory_;
-}
-
-TileKey TileManager::getTempClosestKey() const {
-    return tempClosestKey_;
-}
-
-std::string TileManager::getTilePath(const TileKey& key) const {
-    return outputDirectory_ + "/tile_" + std::to_string(key.y) + "_" + std::to_string(key.x) + ".png";
-}
-
 void TileManager::loadGlobalMetadata() {
     const std::string path = outputDirectory_ + "/" + COORDS_METADATA;
     std::ifstream in(path);
@@ -126,7 +110,7 @@ std::pair<double, double> TileManager::calculateTileGPS(const TileKey& tileKey, 
     return {lat, lon}; 
 }
 
-double TileManager::estimateGSD(const std::map<std::string, double> exif) const {
+double TileManager::estimateGSD(const std::map<std::string, double>& exif) const {
     if (exif.count(EXIFTAGS::FOCAL_LENGTH_TAG) && exif.count(EXIFTAGS::IMAGE_WIDTH_TAG) && exif.at(EXIFTAGS::FOCAL_LENGTH_TAG) != 0.0 && exif.at(EXIFTAGS::IMAGE_WIDTH_TAG) != 0.0) {
         double alt = exif.count(EXIFTAGS::GPS_ALTITUDE_TAG) ? exif.at(EXIFTAGS::GPS_ALTITUDE_TAG) : 0.0;
         double flen = exif.at(EXIFTAGS::FOCAL_LENGTH_TAG);
@@ -145,7 +129,7 @@ cv::Mat TileManager::loadTile(const TileKey& key) const {
     return cv::Mat(TILE_SIZE, TILE_SIZE, CV_8UC4, cv::Scalar(0, 0, 0, 0));
 }
 
-void TileManager::assignMetadata(const std::string imagePath, const double lat, const double lon, const double alt, const double flen, const double gpsDir) const {
+void TileManager::assignMetadata(const std::string& imagePath, const double lat, const double lon, const double alt, const double flen, const double gpsDir) const {
     std::ostringstream tagStream;
     tagStream << "-n\n";
     tagStream << "-" << EXIFTAGS::GPS_LATITUDE_TAG << "=" << lat << "\n";
@@ -160,16 +144,13 @@ void TileManager::assignMetadata(const std::string imagePath, const double lat, 
 void TileManager::saveTile(const TileKey& key, const cv::Mat& tile, const double lat, const double lon, const std::map<std::string, double>& exif) const {
     std::string path = getTilePath(key);
     
-    bool tileExists = fs::exists(path);
     bool hasExistingGps = false;
     std::map<std::string, double> parsedExistingExif;
-    if (tileExists) {
-        std::vector<std::string> existingTags = {EXIFTAGS::GPS_LATITUDE_TAG, EXIFTAGS::GPS_LONGITUDE_TAG, EXIFTAGS::GPS_ALTITUDE_TAG, EXIFTAGS::FOCAL_LENGTH_TAG, EXIFTAGS::GPS_IMG_DIRECTION_TAG};
-        auto rawExistingExif = exiftool_.getExifTags(path, existingTags);
-        parsedExistingExif = exiftool_.parseExifValuesToNumbers(rawExistingExif);
-        if (parsedExistingExif.count(EXIFTAGS::GPS_LATITUDE_TAG) && parsedExistingExif.count(EXIFTAGS::GPS_LONGITUDE_TAG)) {
-            hasExistingGps = true;
-        }
+    std::vector<std::string> existingTags = {EXIFTAGS::GPS_LATITUDE_TAG, EXIFTAGS::GPS_LONGITUDE_TAG, EXIFTAGS::GPS_ALTITUDE_TAG, EXIFTAGS::FOCAL_LENGTH_TAG, EXIFTAGS::GPS_IMG_DIRECTION_TAG};
+    auto rawExistingExif = exiftool_.getExifTags(path, existingTags);
+    parsedExistingExif = exiftool_.parseExifValuesToNumbers(rawExistingExif);
+    if (parsedExistingExif.count(EXIFTAGS::GPS_LATITUDE_TAG) && parsedExistingExif.count(EXIFTAGS::GPS_LONGITUDE_TAG)) {
+        hasExistingGps = true;
     }
     
     cv::imwrite(path, tile);
@@ -248,7 +229,7 @@ bool TileManager::isMostlyTransparent(const cv::Mat& tileMat, double threshold =
     return false;
 }
 
-double TileManager::findTileDistance(std::string tilePath, double latToCompare, double lonToCompare) {
+double TileManager::findTileDistance(const std::string& tilePath, double latToCompare, double lonToCompare) {
     double lat = exiftool_.parseExifGPS(exiftool_.getExifTag(tilePath, EXIFTAGS::GPS_LATITUDE_TAG));
     double lon = exiftool_.parseExifGPS(exiftool_.getExifTag(tilePath, EXIFTAGS::GPS_LONGITUDE_TAG));
 
@@ -405,7 +386,7 @@ void TileManager::blendOntoTile(cv::Mat& tile, const cv::Mat& patch, const cv::R
     cv::merge(tileChannels, tile(validROI));
 }
 
-void TileManager::applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homography, double gsd, std::map<std::string, double> exif) {
+void TileManager::applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homography, double gsd, std::map<std::string, double>& exif) {
     std::vector<cv::Point2f> corners = {
         {0, 0},
         {(float)img.cols, 0},
@@ -477,7 +458,7 @@ void TileManager::applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homograp
     tempClosestKey_.y = 0;
 }
 
-void TileManager::applyImagePerTile(const cv::Mat& img, const cv::Mat& homography, double gsd, std::map<std::string, double> exif) {
+void TileManager::applyImagePerTile(const cv::Mat& img, const cv::Mat& homography, double gsd, std::map<std::string, double>& exif) {
     std::vector<cv::Point2f> corners = {
         {0, 0},
         {(float)img.cols, 0},

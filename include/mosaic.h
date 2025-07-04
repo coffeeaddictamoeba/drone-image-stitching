@@ -57,9 +57,21 @@ class TileManager {
 public:
     TileManager(const std::string& outputDir, ExifToolPipe& tool);
 
-    std::string getOutputDirectory() const;
-    std::string getTilePath(const TileKey& key) const;
-    TileKey getTempClosestKey() const;
+    inline TileKey getTileKeyForPoint(int x, int y) const {
+        return { x / TILE_SIZE, y / TILE_SIZE };
+    }
+    
+    inline std::string getOutputDirectory() const {
+        return outputDirectory_;
+    }
+    
+    inline TileKey getTempClosestKey() const {
+        return tempClosestKey_;
+    }
+    
+    inline std::string getTilePath(const TileKey& key) const {
+        return outputDirectory_ + "/tile_" + std::to_string(key.y) + "_" + std::to_string(key.x) + ".png";
+    }
 
     void loadGlobalMetadata();
     void saveGlobalMetadata() const;
@@ -67,25 +79,24 @@ public:
     cv::Mat loadTile(const TileKey& key) const;
     void saveTile(const TileKey& key, const cv::Mat& tile, double lat, double lon, const std::map<std::string, double>& exif) const;
 
-    TileKey getTileKeyForPoint(int x, int y) const;
     cv::Mat computeGlobalHomography(const TileKey& localOriginKey, const cv::Mat& localHomography);
 
-    double estimateGSD(const std::map<std::string, double> exif) const;
+    double estimateGSD(const std::map<std::string, double>& exif) const;
     std::pair<double, double> calculateTileGPS(const TileKey& tileKey, const TileKey& centerTile, double centerLat, double centerLon, double gsd) const;
-    void assignMetadata(const std::string imagePath, double lat, double lon, double alt, double flen, double gpsDir) const;
+    void assignMetadata(const std::string& imagePath, double lat, double lon, double alt, double flen, double gpsDir) const;
 
     void applyImage(const std::string& imagePath, const cv::Mat& homography, bool warpOnce);
 
     bool isMostlyTransparent(const cv::Mat& tileMat, double threshold) const;
 
-    double findTileDistance(std::string tilePath, double latToCompare, double lonToCompare);
+    double findTileDistance(const std::string& tilePath, double latToCompare, double lonToCompare);
     std::optional<TileKey> findClosestTile(double lat, double lon);
 
 private:
     void blendOntoTile(cv::Mat& tile, const cv::Mat& patch, const cv::Rect& roi, int featheringPx);
     cv::Mat warpTileRegion(const cv::Mat& input, const cv::Mat& H, const cv::Rect& tileRect) const;
-    void applyImagePerTile(const cv::Mat& img, const cv::Mat& homography, double gsd, std::map<std::string, double> exif);
-    void applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homography, double gsd, std::map<std::string, double> exif);
+    void applyImagePerTile(const cv::Mat& img, const cv::Mat& homography, double gsd, std::map<std::string, double>& exif);
+    void applyImageWarpOnce(const cv::Mat& img, const cv::Mat& homography, double gsd, std::map<std::string, double>& exif);
 
     std::string outputDirectory_;
     ExifToolPipe& exiftool_;
@@ -109,12 +120,12 @@ class MosaicBuilder {
 public:
     MosaicBuilder(ExifToolPipe& tool, TileManager& tileManager);
 
-    ImageMatrix toImageMatrix(std::string imagePath) const;
+    ImageMatrix toImageMatrix(const std::string& imagePath) const;
 
-    bool loadImages(std::string refImagePath, std::string targetImagePath);
+    bool loadImages(const std::string& refImagePath, const std::string& targetImagePath);
 
     bool alignImages(const ImageMatrix& src, const ImageMatrix& dst, cv::Mat& H);
-    bool stitchToTiles(std::string refImagePath, std::string targetImagePath);
+    bool stitchToTiles(const std::string& refImagePath, const std::string& targetImagePath);
     bool addImageToMosaic(const std::string& newImagePath);
 
     cv::Mat mosaicFromTiles(const std::string& tileDir, cv::Rect& mosaicBounds);
@@ -128,5 +139,5 @@ private:
     TileManager& tiles_;
     cv::Mat homography_;
 
-    cv::Mat getMosaicAroundTile(TileKey center, int radius, cv::Rect& outBounds);
+    cv::Mat getMosaicAroundTile(TileKey& center, int radius, cv::Rect& outBounds);
 };

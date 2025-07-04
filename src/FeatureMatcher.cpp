@@ -3,6 +3,9 @@
 #include <iostream>
 #include <algorithm>
 #include <vector>
+#ifdef _OPENMP
+    #include <omp.h>
+#endif
 
 FeatureMatcher::FeatureMatcher(ExifToolPipe& tool, const std::string& detectorType): exiftool(tool) {
     if (detectorType == "SIFT") {
@@ -18,7 +21,7 @@ FeatureMatcher::FeatureMatcher(ExifToolPipe& tool, const std::string& detectorTy
     }
 }
 
-void FeatureMatcher::detectAndDescribe(const cv::Mat& image, std::vector<cv::KeyPoint>& keypoints, cv::Mat& descriptors) {
+inline void FeatureMatcher::detectAndDescribe(const cv::Mat& image, std::vector<cv::KeyPoint>& keypoints, cv::Mat& descriptors) {
     if (image.empty()) {
         #ifdef DEBUG
         std::cerr << "[WARN] FeatureMatcher::detectAndDescribe called with empty image.\n";
@@ -30,7 +33,7 @@ void FeatureMatcher::detectAndDescribe(const cv::Mat& image, std::vector<cv::Key
     detector->detectAndCompute(image, cv::noArray(), keypoints, descriptors);
 }
 
-bool FeatureMatcher::computeHomography(const ImageMatrix src, const ImageMatrix dst, cv::Mat& H, std::vector<cv::DMatch>& goodMatches) {
+bool FeatureMatcher::computeHomography(const ImageMatrix& src, const ImageMatrix& dst, cv::Mat& H, std::vector<cv::DMatch>& goodMatches) {
     goodMatches.clear(); 
 
     std::vector<cv::KeyPoint> kp1, kp2;
@@ -38,8 +41,14 @@ bool FeatureMatcher::computeHomography(const ImageMatrix src, const ImageMatrix 
 
     const std::string& dstPath = dst.imagePath;
 
-    detectAndDescribe(src.imageMatrix, kp1, desc1);
-    detectAndDescribe(dst.imageMatrix, kp2, desc2);
+    #pragma omp parallel sections
+    {
+        #pragma omp section
+        detectAndDescribe(src.imageMatrix, kp1, desc1);
+        
+        #pragma omp section
+        detectAndDescribe(dst.imageMatrix, kp2, desc2);
+    }
 
     if (desc1.empty() || desc2.empty()) {
         #ifdef DEBUG
@@ -52,13 +61,11 @@ bool FeatureMatcher::computeHomography(const ImageMatrix src, const ImageMatrix 
     std::vector<std::vector<cv::DMatch>> knnMatches;
     matcher->knnMatch(desc1, desc2, knnMatches, 2);
 
-    goodMatches.reserve(knnMatches.size()); // avoid realloc
-    for (const auto& pair : knnMatches) {
-        if (pair.size() < 2) continue;
-        if (pair[0].distance < 0.75f * pair[1].distance)
-            goodMatches.emplace_back(pair[0]);
+    goodMatches.reserve(knnMatches.size());
+    for (const auto& m : knnMatches) {
+        if (m.size() == 2 && m[0].distance < 0.75f * m[1].distance)
+            goodMatches.push_back(m[0]);
     }
-
 
     #ifdef DEBUG
     std::cout << "[" << dstPath << "] Good matches found: " << goodMatches.size() << '\n';

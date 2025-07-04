@@ -14,7 +14,7 @@ namespace fs = std::filesystem;
 
 MosaicBuilder::MosaicBuilder(ExifToolPipe& tool, TileManager& tileManager) : exiftool_(tool), tiles_(tileManager) {}
 
-ImageMatrix MosaicBuilder::toImageMatrix(std::string imagePath) const {
+ImageMatrix MosaicBuilder::toImageMatrix(const std::string& imagePath) const {
     cv::Mat matrix = cv::imread(imagePath, cv::IMREAD_UNCHANGED);
     if (matrix.empty()) {
         std::cerr << "Failed to load the image.\n";
@@ -23,7 +23,7 @@ ImageMatrix MosaicBuilder::toImageMatrix(std::string imagePath) const {
     return ImageMatrix{matrix, imagePath};
 }
 
-bool MosaicBuilder::loadImages(std::string refImagePath, std::string targetImagePath) {
+bool MosaicBuilder::loadImages(const std::string& refImagePath, const std::string& targetImagePath) {
     ref_ = toImageMatrix(refImagePath);
     target_ = toImageMatrix(targetImagePath);
     return !ref_.imageMatrix.empty() && !target_.imageMatrix.empty();
@@ -39,7 +39,7 @@ bool MosaicBuilder::alignImages(const ImageMatrix& src, const ImageMatrix& dst, 
     return true;
 }
 
-bool MosaicBuilder::stitchToTiles(std::string refImagePath, std::string targetImagePath) {
+bool MosaicBuilder::stitchToTiles(const std::string& refImagePath, const std::string& targetImagePath) {
     if (!loadImages(refImagePath, targetImagePath)) {
         std::cerr << "Failed to load input images.\n";
         return false;
@@ -266,7 +266,7 @@ cv::Mat MosaicBuilder::mosaicFromTiles(const std::string& tileDir, cv::Rect& mos
     return mosaic;
 }
 
-cv::Mat MosaicBuilder::getMosaicAroundTile(TileKey center, int radius, cv::Rect& outBounds) {
+cv::Mat MosaicBuilder::getMosaicAroundTile(TileKey& center, int radius, cv::Rect& outBounds) {
     int minX = center.x - radius;
     int maxX = center.x + radius;
     int minY = center.y - radius;

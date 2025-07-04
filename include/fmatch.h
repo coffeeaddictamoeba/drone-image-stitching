@@ -13,7 +13,7 @@ struct ImageMatrix {
 class FeatureMatcher {
 public:
     FeatureMatcher(ExifToolPipe& tool, const std::string& detectorType = "SIFT");
-    bool computeHomography(const ImageMatrix src, const ImageMatrix dst, cv::Mat& H, std::vector<cv::DMatch>& goodMatches);
+    bool computeHomography(const ImageMatrix& src, const ImageMatrix& dst, cv::Mat& H, std::vector<cv::DMatch>& goodMatches);
 
 private:
     cv::Ptr<cv::Feature2D> detector;

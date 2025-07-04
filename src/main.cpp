@@ -123,6 +123,10 @@ public:
             std::cout << "Enter image path (or blank to quit): ";
             std::getline(std::cin, path);
             if (path.empty()) break;
+            if (!fs::exists(path)) {
+                std::cout << "No image exists at path: " << path << "\n";
+                continue;
+            }
             addImage(path);
         }
     }
