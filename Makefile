@@ -5,16 +5,25 @@ LIBS := $(shell $(PKGCONFIG) --cflags --libs opencv4)
 
 SRC_DIR := src
 OBJ_DIR := obj
-BIN := mosaic
+BIN_DIR := bin
+
 TILES_DIR := tiles
 RES_IMG_DIR := results
 
-SRCS := $(wildcard $(SRC_DIR)/*.cpp)
-OBJS := $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(SRCS))
+MOSAIC_BIN := $(BIN_DIR)/mosaic
+MOSAIC_SRCS := $(SRC_DIR)/main.cpp $(SRC_DIR)/ExifToolPipe.cpp $(SRC_DIR)/FeatureMatcher.cpp $(SRC_DIR)/MosaicBuilder.cpp $(SRC_DIR)/MosaicTileManager.cpp
+MOSAIC_OBJS := $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(MOSAIC_SRCS))
 
-all: $(BIN)
+DEBLUR_BIN := $(BIN_DIR)/deblur
+DEBLUR_SRCS := $(SRC_DIR)/deblur.cpp
+DEBLUR_OBJS := $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(DEBLUR_SRCS))
 
-$(BIN): $(OBJS)
+all: $(MOSAIC_BIN) $(DEBLUR_BIN)
+
+$(MOSAIC_BIN): $(MOSAIC_OBJS) | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS)
+
+$(DEBLUR_BIN): $(DEBLUR_OBJS) | $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS)
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp | $(OBJ_DIR)
@@ -23,7 +32,10 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp | $(OBJ_DIR)
 $(OBJ_DIR):
 	mkdir -p $(OBJ_DIR)
 
+$(BIN_DIR):
+	mkdir -p $(BIN_DIR)
+
 clean:
-	rm -rf $(OBJ_DIR) $(BIN) $(TILES_DIR) $(RES_IMG_DIR)
+	rm -rf $(OBJ_DIR) $(BIN_DIR) $(TILES_DIR) $(RES_IMG_DIR)
 
 .PHONY: all clean

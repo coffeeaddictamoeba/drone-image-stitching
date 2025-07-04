@@ -22,10 +22,3 @@ private:
 
     void detectAndDescribe(const cv::Mat& image, std::vector<cv::KeyPoint>& keypoints, cv::Mat& descriptors);
 };
-
-class Deblurrer {
-    public:
-        Deblurrer();
-        // methods will be added soon
-    private:
-};

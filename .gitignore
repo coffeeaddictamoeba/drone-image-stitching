@@ -35,5 +35,7 @@ incoming/
 stitched/
 mosaic
 obj/
+bin/
 tiles/
 results/
+deblurred/
