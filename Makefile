@@ -1,5 +1,5 @@
 CXX := g++
-CXXFLAGS := -std=c++20 -Wall -Wextra -O2 -DDEBUG -Iexternal/ctre -fopenmp
+CXXFLAGS := -std=c++20 -Wall -Wextra -O2 -DDEBUG -Iexternal/ctre -fopenmp -lfftw3f
 PKGCONFIG := pkg-config
 LIBS := $(shell $(PKGCONFIG) --cflags --libs opencv4)
 
@@ -9,6 +9,7 @@ BIN_DIR := bin
 
 TILES_DIR := tiles
 RES_IMG_DIR := results
+DEBLUR_DIR := deblurred
 
 MOSAIC_BIN := $(BIN_DIR)/mosaic
 MOSAIC_SRCS := $(SRC_DIR)/main.cpp $(SRC_DIR)/ExifToolPipe.cpp $(SRC_DIR)/FeatureMatcher.cpp $(SRC_DIR)/MosaicBuilder.cpp $(SRC_DIR)/MosaicTileManager.cpp
@@ -36,6 +37,6 @@ $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 
 clean:
-	rm -rf $(OBJ_DIR) $(BIN_DIR) $(TILES_DIR) $(RES_IMG_DIR)
+	rm -rf $(OBJ_DIR) $(BIN_DIR) $(TILES_DIR) $(RES_IMG_DIR) $(DEBLUR_DIR)
 
 .PHONY: all clean
