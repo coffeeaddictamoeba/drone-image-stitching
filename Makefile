@@ -16,7 +16,7 @@ MOSAIC_SRCS := $(SRC_DIR)/main.cpp $(SRC_DIR)/ExifToolPipe.cpp $(SRC_DIR)/Featur
 MOSAIC_OBJS := $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(MOSAIC_SRCS))
 
 DEBLUR_BIN := $(BIN_DIR)/deblur
-DEBLUR_SRCS := $(SRC_DIR)/deblur.cpp
+DEBLUR_SRCS := $(SRC_DIR)/deblur.cpp $(SRC_DIR)/dblrutils.cpp $(SRC_DIR)/deblurtest.cpp  
 DEBLUR_OBJS := $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(DEBLUR_SRCS))
 
 all: $(MOSAIC_BIN) $(DEBLUR_BIN)
