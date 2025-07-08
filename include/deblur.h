@@ -10,6 +10,13 @@ struct LStepFFTInputsContainer {
     cv::Mat F_f_conj_64FC2; // Conjugate of F_f, converted to CV_64FC2 for multiplication
 };
 
+struct FStepFFTInputsContainer {
+    cv::Mat F_L;         // FFT of padded L (latent image)
+    cv::Mat F_L_conj;    // Conjugate of F_L
+    cv::Mat F_I_64FC2;   // FFT of padded blurred image (ensured CV_64FC2)
+    std::vector<cv::Mat> F_p_k; // FFTs of padded p_k auxiliary variables
+};
+
 class BlindDeblurrer {
 public:
     cv::Mat L; // Latent image estimate
@@ -62,10 +69,8 @@ public:
      */
     void setupForScale(const cv::Mat& blurred_image_scale, int initial_kernel_size);
 
-    /**
-     * @brief Placeholder for the L-step update function.
-     */
     void updateLStep();
+    void updateFStep();
 
 private:
     /**
@@ -94,9 +99,16 @@ private:
      */
     void computeLocalSmoothnessMask(const cv::Mat& blurred_img_scale);
 
+    // L-step helpers
     void padImageForDFT(const cv::Mat& input, cv::Mat& padded_output, cv::Size& dft_size);
     void performLStepIFFTAndPostProcess(const cv::Mat& F_L_updated);
     cv::Mat computeLDenominator(const cv::Mat& F_f);
     cv::Mat computeLNumerator(const LStepFFTInputsContainer& inputs);
     LStepFFTInputsContainer prepareLStepInputsAndFFTs();
+
+    // F-step helpers
+    FStepFFTInputsContainer prepareFStepInputsAndFFTs();
+    cv::Mat computeFNumerator(const FStepFFTInputsContainer& inputs);
+    cv::Mat computeFDenominator(const FStepFFTInputsContainer& inputs);
+    void performFStepIFFTAndPostProcess(const cv::Mat& F_f_updated);
 };

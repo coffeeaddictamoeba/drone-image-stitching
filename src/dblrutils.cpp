@@ -10,10 +10,11 @@ cv::Size getOptimalDFTSize(const cv::Size& size) {
     return cv::Size(c, r);
 }
 
+// In your dblrutils.h or .cpp where fft2d is defined
+
 void fft2d(const cv::Mat& input_real, cv::Mat& output_complex) {
-    cv::Mat planes[] = {input_real, cv::Mat::zeros(input_real.size(), CV_32F)};
-    cv::merge(planes, 2, output_complex);
-    cv::dft(output_complex, output_complex, cv::DFT_COMPLEX_OUTPUT);
+    CV_Assert(input_real.channels() == 1 && (input_real.depth() == CV_32F || input_real.depth() == CV_64F));
+    cv::dft(input_real, output_complex, cv::DFT_COMPLEX_OUTPUT);
 }
 
 void ifft2d(const cv::Mat& input_complex, cv::Mat& output_real) {
@@ -91,7 +92,7 @@ void checkInfNan(const cv::Mat& m, const std::string& matrixName) {
 }
 
 void debugMatrix(const cv::Mat& m, const std::string& matrixName) {
-    const std::string filename = saveDir + "/" + matrixName + ".yml";
+    const std::string filename = matrixName + ".yml";
     writeMatrix(m, filename, matrixName);
     checkInfNan(m, matrixName);
     checkExactZero(m);

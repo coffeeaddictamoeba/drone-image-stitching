@@ -84,5 +84,32 @@ int main() {
     } catch (...) {
         std::cerr << "Unknown Exception during L-step." << std::endl;
     }
+
+    // --- Call and Test the F-step ---
+    std::cout << "Executing one F-step iteration..." << std::endl;
+    try {
+        deblurrer.updateFStep();
+
+        cv::Mat f_display;
+        double min_f, max_f;
+        cv::minMaxLoc(deblurrer.f, &min_f, &max_f);
+        if (max_f > 0) {
+            deblurrer.f.convertTo(f_display, CV_8U, 255.0 / max_f);
+        } else {
+            f_display = cv::Mat::zeros(deblurrer.f.size(), CV_8U); // All black if max is 0
+        }
+        
+        cv::imwrite(std::string(OUTPUT_DIR) + "/f_after_1_Fstep.png", f_display);
+        std::cout << "Updated f after 1 F-step saved to " << OUTPUT_DIR << "/f_after_1_Fstep.png" << std::endl;
+        std::cout << "F-step completed successfully." << std::endl;
+
+    } catch (const cv::Exception& e) {
+        std::cerr << "OpenCV Exception during F-step: " << e.what() << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Standard Exception during F-step: " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "Unknown Exception during F-step." << std::endl;
+    }
+
     return 0;
 }
