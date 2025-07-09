@@ -9,7 +9,7 @@ cv::Size getOptimalDFTSize(const cv::Size& size);
 
 /**
  * @brief Performs a 2D Forward Fast Fourier Transform (FFT).
- * @param input_real The input real-valued image.
+ * @param input_realThe input real-valued image.
  * @param output_complex The output complex-valued DFT result.
  */
 void fft2d(const cv::Mat& input_real, cv::Mat& output_complex);
@@ -17,9 +17,9 @@ void fft2d(const cv::Mat& input_real, cv::Mat& output_complex);
 /**
  * @brief Performs a 2D Inverse Fast Fourier Transform (FFT).
  * @param input_complex The input complex-valued DFT result.
- * @param output_real The output real-valued image.
+ * @param output_complex The output complex-valued image.
  */
-void ifft2d(const cv::Mat& input_complex, cv::Mat& output_real);
+void ifft2d(const cv::Mat& input_complex, cv::Mat& output_complex);
 
 /**
  * @brief Saves given matrix to a specified file.
@@ -61,6 +61,6 @@ void checkExactZero(const cv::Mat& m);
  * @param denominator Denominator matrix for division.
  * @return The result matrix after complex division.
  */
-cv::Mat divideComplex(cv::Mat& numerator, cv::Mat& denominator);
+ cv::Mat divideComplex(const cv::Mat& numerator, const cv::Mat& denominator);
 
 void printMatStats(const cv::Mat& mat, const std::string& name);

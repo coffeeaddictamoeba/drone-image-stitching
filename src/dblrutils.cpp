@@ -10,15 +10,17 @@ cv::Size getOptimalDFTSize(const cv::Size& size) {
     return cv::Size(c, r);
 }
 
-// In your dblrutils.h or .cpp where fft2d is defined
-
 void fft2d(const cv::Mat& input_real, cv::Mat& output_complex) {
-    CV_Assert(input_real.channels() == 1 && (input_real.depth() == CV_32F || input_real.depth() == CV_64F));
-    cv::dft(input_real, output_complex, cv::DFT_COMPLEX_OUTPUT);
+    CV_Assert(input_real.channels() == 1);
+    cv::Mat planes[] = { input_real.clone(), cv::Mat::zeros(input_real.size(), input_real.type()) };
+    cv::Mat complex_input;
+    cv::merge(planes, 2, complex_input);
+    cv::dft(complex_input, output_complex, cv::DFT_COMPLEX_OUTPUT);
 }
 
-void ifft2d(const cv::Mat& input_complex, cv::Mat& output_real) {
-    cv::dft(input_complex, output_real, cv::DFT_INVERSE | cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
+void ifft2d(const cv::Mat& input_complex, cv::Mat& output_complex) {
+    CV_Assert(input_complex.channels() == 2);
+    cv::dft(input_complex, output_complex, cv::DFT_INVERSE | cv::DFT_SCALE | cv::DFT_COMPLEX_OUTPUT);
 }
 
 void writeMatrix(const cv::Mat& m, const std::string& filename, const std::string& matrixName) {
@@ -131,7 +133,7 @@ void checkExactZero(const cv::Mat& m) {
     std::cout << "Debug: Exact zero complex elements: " << exactZeroCount << "\n";
 }
 
-cv::Mat divideComplex(cv::Mat& numerator, cv::Mat& denominator) {
+cv::Mat divideComplex(const cv::Mat& numerator, const cv::Mat& denominator) {
     cv::Mat result(numerator.size(), CV_64FC2);
     for (int r = 0; r < numerator.rows; ++r) {
         for (int c = 0; c < numerator.cols; ++c) {

@@ -37,7 +37,6 @@ public:
 
     // Optimization parameters
     float rho;
-    float tau;
     float lambda1;
     float lambda2;
     float sigma1;
@@ -63,19 +62,13 @@ public:
 
     // Constructor
     BlindDeblurrer() {
+        lambda1 = 0.005f;
+        lambda2 = 0.05f;
         rho = 0.1f;
-        tau = 0.001f;
-        lambda1 = 1.0f;
-        lambda2 = 1.0f;
         sigma1 = 0.02f;
         rho_max = 100.0f;
     };
 
-    /**
-     * @brief Sets up all variables and parameters for a given image scale.
-     * @param blurred_image_scale The blurred image at the current scale.
-     * @param initial_kernel_size The initial guess for the blur kernel dimension.
-     */
     void setupForScale(const cv::Mat& blurred_image_scale, int initial_kernel_size);
 
     void updateLStep();
@@ -83,30 +76,11 @@ public:
     void updateAuxAndLagrange();
 
 private:
-    /**
-     * @brief Creates an initial impulse kernel.
-     * @param size The dimension of the square kernel.
-     */
-    static cv::Mat createInitialImpulseKernel(int size);
-
-    /**
-     * @brief Computes the gradient in X-direction.
-     */
+    cv::Mat createInitialImpulseKernel(int size);
     void computeGradientX(const cv::Mat& input, cv::Mat& output);
-
-    /**
-     * @brief Computes the gradient in Y-direction.
-     */
     void computeGradientY(const cv::Mat& input, cv::Mat& output);
-
-    /**
-     * @brief Computes and stores the FFTs of standard derivative filters.
-     */
     void computeDerivativeFiltersFFTs();
 
-    /**
-     * @brief Computes the local smoothness mask (M_mask).
-     */
     void computeLocalSmoothnessMask(const cv::Mat& blurred_img_scale);
 
     void initializeSpatialDerivativeKernels();
