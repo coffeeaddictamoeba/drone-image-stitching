@@ -62,3 +62,5 @@ void checkExactZero(const cv::Mat& m);
  * @return The result matrix after complex division.
  */
 cv::Mat divideComplex(cv::Mat& numerator, cv::Mat& denominator);
+
+void printMatStats(const cv::Mat& mat, const std::string& name);

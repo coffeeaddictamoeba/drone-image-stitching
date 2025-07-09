@@ -148,3 +148,31 @@ cv::Mat divideComplex(cv::Mat& numerator, cv::Mat& denominator) {
     }
     return result;
 }
+
+void printMatStats(const cv::Mat& mat, const std::string& name) {
+    if (mat.empty()) {
+        std::cout << "DEBUG_STATS: " << name << " is empty.\n";
+        return;
+    }
+    double minVal, maxVal;
+    cv::minMaxLoc(mat, &minVal, &maxVal);
+    cv::Scalar meanVal, stddevVal;
+    cv::meanStdDev(mat, meanVal, stddevVal);
+
+    if (mat.channels() == 1) {
+        std::cout << "DEBUG_STATS: " << name << " (1-ch) - Min: " << minVal << ", Max: " << maxVal
+                  << ", Mean: " << meanVal[0] << ", StdDev: " << stddevVal[0] << "\n";
+    } else if (mat.channels() == 2) { // Complex numbers (CV_64FC2, etc.)
+        cv::Mat planes[2];
+        cv::split(mat, planes);
+        double minReal, maxReal, minImag, maxImag;
+        cv::minMaxLoc(planes[0], &minReal, &maxReal);
+        cv::minMaxLoc(planes[1], &minImag, &maxImag);
+        std::cout << "DEBUG_STATS: " << name << " (2-ch complex) - MinReal: " << minReal << ", MaxReal: " << maxReal
+                  << ", MinImag: " << minImag << ", MaxImag: " << maxImag
+                  << ", MeanReal: " << meanVal[0] << ", StdDevReal: " << stddevVal[0]
+                  << ", MeanImag: " << meanVal[1] << ", StdDevImag: " << stddevVal[1] << "\n";
+    } else {
+        std::cout << "DEBUG_STATS: " << name << " - Unknown channel count: " << mat.channels() << "\n";
+    }
+}

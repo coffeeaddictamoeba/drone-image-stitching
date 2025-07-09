@@ -28,6 +28,10 @@ public:
     std::vector<cv::Mat> p_k; // Auxiliary variables for noise derivatives
     std::vector<cv::Mat> psi_k; // Lagrange multipliers for noise derivatives
 
+    // Previous auxiliary variables for rho update ---
+    cv::Mat h_x_prev, h_y_prev;
+    std::vector<cv::Mat> p_k_prev;
+
     // Noise parameters
     std::vector<float> zeta_k;
 
@@ -37,6 +41,7 @@ public:
     float lambda1;
     float lambda2;
     float sigma1;
+    float rho_max;
 
     // Current image and DFT dimensions
     cv::Size current_img_size;
@@ -50,6 +55,9 @@ public:
     // Pre-computed FFTs of derivative filters
     std::vector<cv::Mat> F_deriv_filters;
 
+    // Pre-computed spatial derivative kernels (for h_x, h_y, p_k updates)
+    std::vector<cv::Mat> spatial_deriv_kernels;
+
     // Local smoothness mask
     cv::Mat M_mask;
 
@@ -60,6 +68,7 @@ public:
         lambda1 = 1.0f;
         lambda2 = 1.0f;
         sigma1 = 0.02f;
+        rho_max = 100.0f;
     };
 
     /**
@@ -71,6 +80,7 @@ public:
 
     void updateLStep();
     void updateFStep();
+    void updateAuxAndLagrange();
 
 private:
     /**
@@ -99,6 +109,8 @@ private:
      */
     void computeLocalSmoothnessMask(const cv::Mat& blurred_img_scale);
 
+    void initializeSpatialDerivativeKernels();
+
     // L-step helpers
     void padImageForDFT(const cv::Mat& input, cv::Mat& padded_output, cv::Size& dft_size);
     void performLStepIFFTAndPostProcess(const cv::Mat& F_L_updated);
@@ -111,4 +123,7 @@ private:
     cv::Mat computeFNumerator(const FStepFFTInputsContainer& inputs);
     cv::Mat computeFDenominator(const FStepFFTInputsContainer& inputs);
     void performFStepIFFTAndPostProcess(const cv::Mat& F_f_updated);
+
+    cv::Mat shrink(const cv::Mat& z, float tau);
+    void updateRho(const cv::Mat& L_x_current, const cv::Mat& L_y_current, const std::vector<cv::Mat>& f_Dk_current);
 };
