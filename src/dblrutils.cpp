@@ -90,6 +90,16 @@ cv::Mat gaussianWindow(int size) {
     return window;
 }
 
+float phi(float x) {
+    const float sigma = 0.02f;
+    return std::abs(x) < sigma ? x * x / (2 * sigma) : std::abs(x) - sigma / 2.0f;
+}
+
+float dphi(float x) {
+    const float sigma = 0.02f;
+    return std::abs(x) < sigma ? x / sigma : (x > 0 ? 1.0f : -1.0f);
+}
+
 // --- Debug helpers ---
 void writeMatrix(const cv::Mat& m, const std::string& filename, const std::string& matrixName) {
     try {

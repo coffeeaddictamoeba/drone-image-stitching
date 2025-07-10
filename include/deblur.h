@@ -60,6 +60,9 @@ public:
     // Local smoothness mask
     cv::Mat M_mask;
 
+    // Global image prior
+    cv::Mat global_prior_grad;
+
     // Constructor
     BlindDeblurrer() {
         lambda1 = 0.005f;
@@ -79,6 +82,7 @@ private:
     cv::Mat createInitialImpulseKernel(int size);
     void computeGradientX(const cv::Mat& input, cv::Mat& output);
     void computeGradientY(const cv::Mat& input, cv::Mat& output);
+    cv::Mat computeGlobalPriorGradient(const cv::Mat& L_in);
     void computeDerivativeFiltersFFTs();
 
     void computeLocalSmoothnessMask(const cv::Mat& blurred_img_scale);

@@ -114,6 +114,33 @@ void BlindDeblurrer::computeGradientY(const cv::Mat& input, cv::Mat& output) {
     cv::filter2D(input, output, -1, kernel_y, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
 }
 
+// Approximate gradient of global image prior w.r.t L
+cv::Mat BlindDeblurrer::computeGlobalPriorGradient(const cv::Mat& L_in) {
+    std::cout << "[Global Prior] Start computing global prior.\n";
+    cv::Mat grad_x, grad_y;
+    computeGradientX(L_in, grad_x);
+    computeGradientY(L_in, grad_y);
+
+    cv::Mat dphi_x = grad_x.clone();
+    cv::Mat dphi_y = grad_y.clone();
+
+    for (int y = 0; y < grad_x.rows; ++y) {
+        for (int x = 0; x < grad_x.cols; ++x) {
+            dphi_x.at<float>(y, x) = dphi(grad_x.at<float>(y, x));
+            dphi_y.at<float>(y, x) = dphi(grad_y.at<float>(y, x));
+        }
+    }
+
+    // Backproject to image space using -div operator (approximate adjoint of gradient)
+    cv::Mat div_x, div_y;
+    computeGradientX(dphi_x, div_x); // forward diff of adjoint (Dx^T)
+    computeGradientY(dphi_y, div_y); // forward diff of adjoint (Dy^T)
+
+    cv::Mat grad = -(div_x + div_y);
+    grad.convertTo(grad, CV_32F);  // Ensure correct type
+    return grad;
+}
+
 cv::Mat BlindDeblurrer::padToSize(const cv::Mat& input, const cv::Size& target_size) {
     cv::Mat padded;
     int pad_bottom = target_size.height - input.rows;
@@ -225,6 +252,8 @@ LStepFFTInputsContainer BlindDeblurrer::prepareLStepInputsAndFFTs() {
 }
 
 cv::Mat BlindDeblurrer::computeLNumerator(const LStepFFTInputsContainer& in) {
+    std::cout << "[L-Step] Start computing L numerator.\n";
+
     // Term 1: conj(F_f) * F_I
     cv::Mat F_I_64F;
     in.F_I.convertTo(F_I_64F, CV_64FC2);
@@ -257,10 +286,14 @@ cv::Mat BlindDeblurrer::computeLNumerator(const LStepFFTInputsContainer& in) {
     }
     term3 *= rho;
 
+    // Term 4: gradient of global prior (spatial domain, added after IFFT)
+    global_prior_grad = computeGlobalPriorGradient(L);
+    std::cout << "[L-Step] End computing L numerator.\n";
     return term1 + term2 + term3;
 }
 
 cv::Mat BlindDeblurrer::computeLDenominator(const cv::Mat& F_f) {
+    std::cout << "[L-Step] Start computing L denominator.\n";
     cv::Mat F_f_64F;
     F_f.convertTo(F_f_64F, CV_64FC2);
 
@@ -283,10 +316,12 @@ cv::Mat BlindDeblurrer::computeLDenominator(const cv::Mat& F_f) {
     cv::max(denom_real, 1e-6, denom_real); // stability
 
     // Merge into complex with 0 imaginary
+    std::cout << "[L-Step] End computing L denominator.\n";
     return mergeRealImag(denom_real, cv::Mat::zeros(current_dft_size, CV_64F));
 }
 
 void BlindDeblurrer::performLStepIFFTAndPostProcess(const cv::Mat& F_L_updated) {
+    std::cout << "[L-Step] Start computing L IFFT.\n";
     cv::Mat spatial_complex;
     ifft2d(F_L_updated, spatial_complex);
 
@@ -300,15 +335,25 @@ void BlindDeblurrer::performLStepIFFTAndPostProcess(const cv::Mat& F_L_updated) 
     }
 
     cv::Mat L_updated = planes[0](cv::Rect(0, 0, current_img_size.width, current_img_size.height)).clone();
+
+    if (global_prior_grad.size() != L_updated.size() || global_prior_grad.type() != CV_32F) {
+        std::cerr << "[ERROR] global_prior_grad has incompatible size or type.\n";
+        std::cerr << "Expected: " << L_updated.size() << " CV_32F, Got: "
+                  << global_prior_grad.size() << " " << global_prior_grad.type() << "\n";
+        return;
+    }    
+
+    // Add spatial global prior gradient
+    cv::Mat prior_weight = 1.0f - M_mask;
+    cv::Mat masked_prior = global_prior_grad.mul(prior_weight);
+    L_updated -= lambda1 * masked_prior;
+
     cv::threshold(L_updated, L_updated, 0.0f, 0.0f, cv::THRESH_TOZERO);
     cv::threshold(L_updated, L_updated, 1.0f, 1.0f, cv::THRESH_TRUNC);
 
-    if (cv::countNonZero(cv::abs(L_updated) > 10.0f)) {
-        std::cerr << "[WARN] L has very large values — possible divergence." << std::endl;
-    }
-
     L = L_updated;
     current_padded_L = padToSize(L, current_dft_size);
+    std::cout << "[L-Step] End computing L IFFT.\n";
 }
 
 void BlindDeblurrer::updateLStep() {

@@ -123,6 +123,33 @@ cv::Mat divideComplex(const cv::Mat& numerator, const cv::Mat& denominator);
  */
 cv::Mat gaussianWindow(int size);
 
+/**
+ * @brief Computes the Huber function (or a similar robust penalty function) for a given value.
+ *
+ * This function acts as a robust penalty, which is quadratic for small values (within `sigma`)
+ * and linear for large values (outside `sigma`). This helps to reduce the influence of outliers.
+ * It's often used in optimization problems, especially those involving L1-like regularization,
+ * to provide a smoother, differentiable approximation of the L1 norm while being less sensitive
+ * to large errors than an L2 (quadratic) norm.
+ *
+ * @param x The input value for which to compute the penalty.
+ * @return float The computed penalty value.
+ */
+float phi(float x);
+
+ /**
+  * @brief Computes the derivative of the Huber function (or similar robust penalty function).
+  *
+  * This function provides the derivative of the `phi` function. For values within `sigma`,
+  * the derivative is linear; for values outside `sigma`, it becomes a constant (either 1.0 or -1.0),
+  * indicating the slope of the linear part of the `phi` function. This derivative is crucial
+  * for optimization algorithms that use gradient descent or similar methods.
+  *
+  * @param x The input value for which to compute the derivative.
+  * @return float The computed derivative value.
+  */
+float dphi(float x); 
+
 // --- Debug helpers ---
 
 /**
