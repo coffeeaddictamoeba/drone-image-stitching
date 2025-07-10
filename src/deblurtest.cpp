@@ -58,6 +58,8 @@ void saveFinalResults(const BlindDeblurrer& deblurrer) {
 
 
 int main() {
+    //generateSyntheticBlur("incoming/not_blurred.jpg", "incoming/now_blurred.jpg", "incoming/kernel_gt.png");
+
     std::string imagePath;
     std::cout << "Enter path to blurred image: ";
     std::cin >> imagePath;

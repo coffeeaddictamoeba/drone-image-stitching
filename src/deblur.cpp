@@ -7,10 +7,28 @@
 
 void BlindDeblurrer::setupForScale(const cv::Mat& blurred_image_scale, int initial_kernel_size) {
     current_img_size = blurred_image_scale.size();
+    rho = 1.0f;
 
     if (initial_kernel_size % 2 == 0) initial_kernel_size++;
 
-    L = blurred_image_scale.clone();
+    // Ensure blurred image is converted to [0,1] float range
+    cv::Mat blurred_normalized;
+    if (blurred_image_scale.depth() == CV_8U) {
+        blurred_image_scale.convertTo(blurred_normalized, CV_32F, 1.0 / 255.0);
+    } else if (blurred_image_scale.depth() == CV_16U) {
+        blurred_image_scale.convertTo(blurred_normalized, CV_32F, 1.0 / 65535.0);
+    } else {
+        blurred_image_scale.convertTo(blurred_normalized, CV_32F); // assumes it is already normalized or floating point
+    }
+
+    cv::Mat L_init;
+    cv::Laplacian(blurred_normalized, L_init, CV_32F, 3);
+    L = blurred_normalized - 0.5f * L_init;
+
+    // Clip L to [0,1]
+    cv::threshold(L, L, 0.0f, 0.0f, cv::THRESH_TOZERO);
+    cv::threshold(L, L, 1.0f, 1.0f, cv::THRESH_TRUNC);
+
     f = createInitialImpulseKernel(initial_kernel_size);
     cv::Size kernel_actual_size = f.size();
 
@@ -39,7 +57,7 @@ void BlindDeblurrer::setupForScale(const cv::Mat& blurred_image_scale, int initi
     int required_dft_width = current_img_size.width + initial_kernel_size - 1;
     current_dft_size = getOptimalDFTSize(cv::Size(required_dft_width, required_dft_height));
 
-    cv::copyMakeBorder(blurred_image_scale, current_padded_blurred,
+    cv::copyMakeBorder(blurred_normalized, current_padded_blurred,
                        0, current_dft_size.height - current_img_size.height,
                        0, current_dft_size.width - current_img_size.width,
                        cv::BORDER_CONSTANT, cv::Scalar::all(0));
@@ -59,12 +77,40 @@ void BlindDeblurrer::setupForScale(const cv::Mat& blurred_image_scale, int initi
     computeLocalSmoothnessMask(blurred_image_scale);
 }
 
+// Create a 2D Gaussian kernel centered at (center, center)
 cv::Mat BlindDeblurrer::createInitialImpulseKernel(int size) {
     cv::Mat kernel = cv::Mat::zeros(size, size, CV_32F);
-    if (size > 0) {
-        kernel.at<float>(0, 0) = 1.0f;
+    int center = size / 2;
+    float sigma = size / 6.0f;
+
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            float dx = x - center;
+            float dy = y - center;
+            kernel.at<float>(y, x) = std::exp(-(dx * dx + dy * dy) / (2 * sigma * sigma));
+        }
     }
+    // Normalize kernel
+    kernel /= cv::sum(kernel)[0];
+
     return kernel;
+}
+
+void centerKernel(cv::Mat& kernel) {
+    cv::Mat centered;
+    int cx = kernel.cols / 2;
+    int cy = kernel.rows / 2;
+
+    // Shift quadrants
+    cv::Mat q0(kernel, cv::Rect(0, 0, cx, cy)); // Top-left
+    cv::Mat q1(kernel, cv::Rect(cx, 0, cx, cy)); // Top-right
+    cv::Mat q2(kernel, cv::Rect(0, cy, cx, cy)); // Bottom-left
+    cv::Mat q3(kernel, cv::Rect(cx, cy, cx, cy)); // Bottom-right
+
+    // Swap diagonals
+    cv::Mat tmp;
+    q0.copyTo(tmp); q3.copyTo(q0); tmp.copyTo(q3);
+    q1.copyTo(tmp); q2.copyTo(q1); tmp.copyTo(q2);
 }
 
 void BlindDeblurrer::computeGradientX(const cv::Mat& input, cv::Mat& output) {
@@ -193,6 +239,10 @@ LStepFFTInputsContainer BlindDeblurrer::prepareLStepInputsAndFFTs() {
 
     fft2d(current_padded_blurred, inputs.F_I);
     fft2d(current_padded_f, inputs.F_f);
+
+    cv::Scalar img_mean, img_std;
+    cv::meanStdDev(current_padded_blurred, img_mean, img_std);
+    std::cout << "DEBUG: Padded blurred image mean (L-step): " << img_mean[0] << ", stddev: " << img_std[0] << std::endl;
 
     cv::Mat F_f_planes[2];
     cv::split(inputs.F_f, F_f_planes); // F_f is CV_32FC2
@@ -341,13 +391,12 @@ void BlindDeblurrer::performLStepIFFTAndPostProcess(const cv::Mat& F_L_updated) 
     L = real_part(cv::Rect(0, 0, current_img_size.width, current_img_size.height)).clone();
     L.convertTo(L, CV_32F);
 
-    // Debug L after cropping and before clipping
     double min_L_cropped, max_L_cropped;
     cv::minMaxLoc(L, &min_L_cropped, &max_L_cropped);
     std::cout << "DEBUG_LSTEP_POST: L (after crop, before clip) Min: " << min_L_cropped << ", Max: " << max_L_cropped << ", Norm: " << cv::norm(L) << std::endl;
 
-    cv::threshold(L, L, 1.0f, 1.0f, cv::THRESH_TRUNC); // Clip values > 1.0 to 1.0
-    cv::threshold(L, L, 0.0f, 0.0f, cv::THRESH_TOZERO); // Clip values < 0.0 to 0.0
+    cv::threshold(L, L, 0.0, 0.0, cv::THRESH_TOZERO);     // Remove negatives
+    cv::threshold(L, L, 1.0, 1.0, cv::THRESH_TRUNC);      // Cap at 1.0
 
     double min_L_clipped, max_L_clipped;
     cv::minMaxLoc(L, &min_L_clipped, &max_L_clipped);
@@ -368,7 +417,6 @@ void BlindDeblurrer::updateLStep() {
 
     LStepFFTInputsContainer inputs = prepareLStepInputsAndFFTs();
     
-    // Debug inputs.F_f and inputs.F_I
     double min_F_f, max_F_f, min_F_I, max_F_I;
     cv::minMaxLoc(inputs.F_f, &min_F_f, &max_F_f);
     cv::minMaxLoc(inputs.F_I, &min_F_I, &max_F_I);
@@ -378,7 +426,6 @@ void BlindDeblurrer::updateLStep() {
     cv::Mat numerator_fft = computeLNumerator(inputs);
     cv::Mat denominator_fft_complex = computeLDenominator(inputs.F_f);
 
-    // Debug numerator and denominator after computation
     double min_num, max_num, min_den, max_den;
     cv::minMaxLoc(numerator_fft, &min_num, &max_num);
     cv::minMaxLoc(denominator_fft_complex, &min_den, &max_den);
@@ -392,7 +439,6 @@ void BlindDeblurrer::updateLStep() {
     cv::minMaxLoc(F_L_updated, &min_F_L_updated, &max_F_L_updated);
     std::cout << "Debug: F_L_updated (After division, before IFFT) - Min Val: " << min_F_L_updated << ", Max Val: " << max_F_L_updated << ", Norm: " << cv::norm(F_L_updated) << std::endl;
     
-    // Check DC component of F_L_updated
     cv::Vec2d dc_fl_updated = F_L_updated.at<cv::Vec2d>(0, 0);
     std::cout << "DEBUG_LSTEP: F_L_updated DC component (0,0): (" << dc_fl_updated[0] << ", " << dc_fl_updated[1] << ")" << std::endl;
 
@@ -401,7 +447,9 @@ void BlindDeblurrer::updateLStep() {
     double min_L_after, max_L_after;
     cv::minMaxLoc(L, &min_L_after, &max_L_after);
     std::cout << "DEBUG_LSTEP: L (after update and clipping) Min: " << min_L_after << ", Max: " << max_L_after << ", Norm: " << cv::norm(L) << std::endl;
-    std::cout << "DEBUG_LSTEP: norm(L - current_img_size_L_before): " << cv::norm(L - cv::Mat(L.size(), L.type(), cv::Scalar(min_L_before))) << std::endl; // Needs a copy of L before update to compare
+    cv::Mat L_before = L.clone();
+    double delta = cv::norm(L - L_before);
+    std::cout << "DEBUG_LSTEP: norm(L - current_img_size_L_before): " << delta << std::endl; // Needs a copy of L before update to compare
 
     std::cout << "Debug: updateLStep() completed successfully." << std::endl;
 }
@@ -411,17 +459,17 @@ FStepFFTInputsContainer BlindDeblurrer::prepareFStepInputsAndFFTs() {
     FStepFFTInputsContainer inputs;
 
     cv::Mat current_padded_L_64F;
-    current_padded_L.convertTo(current_padded_L_64F, CV_64F);
-    fft2d(current_padded_L_64F, inputs.F_L);
+    current_padded_L.convertTo(current_padded_L_64F, CV_64F);   
 
-    cv::Mat F_L_planes_temp[2];
-    cv::split(inputs.F_L, F_L_planes_temp);
-    F_L_planes_temp[1] = -F_L_planes_temp[1];
-    cv::merge(F_L_planes_temp, 2, inputs.F_L_conj);
+    fft2d(current_padded_L_64F, inputs.F_L);
 
     cv::Mat current_padded_blurred_64F;
     current_padded_blurred.convertTo(current_padded_blurred_64F, CV_64F);
     fft2d(current_padded_blurred_64F, inputs.F_I_64FC2);
+
+    cv::Scalar img_mean, img_std;
+    cv::meanStdDev(current_padded_blurred, img_mean, img_std);
+    std::cout << "DEBUG: Padded blurred image mean (F-step): " << img_mean[0] << ", stddev: " << img_std[0] << std::endl;
 
     inputs.F_p_k.resize(6);
     for (int k = 0; k < 6; ++k) {
@@ -518,13 +566,18 @@ void BlindDeblurrer::performFStepIFFTAndPostProcess(const cv::Mat& F_f_updated) 
     f_cropped.convertTo(f, CV_32F);
     cv::threshold(f, f, 0.0f, 0.0f, cv::THRESH_TOZERO);
 
-    cv::Scalar sum_val = cv::sum(f);
-    if (sum_val[0] > std::numeric_limits<float>::epsilon()) {
-        f /= sum_val[0];
+    double kernel_sum = cv::sum(f)[0];
+    if (kernel_sum > std::numeric_limits<float>::epsilon()) {
+        f /= kernel_sum;
     } else {
         f = createInitialImpulseKernel(f.rows);
-        std::cerr << "Warning: Kernel sum was zero/too small after F-step, re-initializing to impulse.\n";
+        std::cerr << "Warning: Kernel sum was zero after F-step, reinitializing.\n";
     }
+
+    centerKernel(f);
+    f = f.mul(gaussianWindow(f.rows));
+    f = 0.9f * f + 0.1f * prior; 
+    f /= cv::sum(f)[0];
 
     current_padded_f = cv::Mat::zeros(current_dft_size, CV_32F);
     cv::Rect roi_f_in_padded(0, 0, f.cols, f.rows);
@@ -557,6 +610,13 @@ void BlindDeblurrer::updateFStep() {
 
     performFStepIFFTAndPostProcess(F_f_updated);
 
+    double debug_min_f, debug_max_f;
+    cv::minMaxLoc(f, &debug_min_f, &debug_max_f);
+
+    std::cout << "DEBUG: Kernel f max: " << debug_max_f
+          << ", sum: " << cv::sum(f)[0]
+          << ", norm: " << cv::norm(f) << "\n";
+
     std::cout << "Debug: updateFStep() completed successfully.\n";
 }
 
@@ -565,11 +625,11 @@ cv::Mat BlindDeblurrer::shrink(const cv::Mat& z, float tau) {
     cv::Mat abs_z, sign_z, thresholded;
     cv::absdiff(z, cv::Scalar(0), abs_z);
 
-    // Create thresholded magnitude
+    // (|z| - tau)_+
     cv::Mat abs_minus_tau = abs_z - tau;
     cv::max(abs_minus_tau, 0, thresholded);
 
-    // Compute sign (vectorized)
+    // sign(z)
     sign_z = cv::Mat::zeros(z.size(), z.type());
     sign_z.setTo(1.0f, z > 0);
     sign_z.setTo(-1.0f, z < 0);
@@ -578,114 +638,61 @@ cv::Mat BlindDeblurrer::shrink(const cv::Mat& z, float tau) {
 }
 
 void BlindDeblurrer::updateRho(const cv::Mat& L_x_current, const cv::Mat& L_y_current, const std::vector<cv::Mat>& f_Dk_current) {
-    // float rho_factor = 1.1f; // Comment out or remove
-    // float mu_balance = 10.0f; // Comment out or remove
-
-    double r_norm_sq = 0.0;
-    // ... (rest of r_norm_sq calculation) ...
-    double r_norm = std::sqrt(r_norm_sq);
-
-    double s_norm_sq = 0.0;
-    // ... (rest of s_norm_sq calculation) ...
-    double s_norm = rho * std::sqrt(s_norm_sq);
-
-    std::cout << "Debug: r_norm: " << r_norm << ", s_norm: " << s_norm << std::endl;
-
-    // // COMMENT OUT OR REMOVE THIS ENTIRE IF/ELSE BLOCK FOR FIXED RHO DEBUGGING
-    // if (r_norm > mu_balance * s_norm) {
-    //     rho *= rho_factor;
-    //     std::cout << "Debug: Increasing rho. New rho: " << rho << std::endl;
-    // } else if (s_norm > mu_balance * r_norm) {
-    //     rho /= rho_factor;
-    //     std::cout << "Debug: Decreasing rho. New rho: " << rho << std::endl;
-    // } else {
-    //     std::cout << "Debug: Rho unchanged. Rho: " << rho << std::endl;
-    // }
-
-    // float rho_min_val = 1e-3f;
-    // rho = std::max(rho_min_val, std::min(rho_max, rho));
-    
-    // TEMPORARY: FIX RHO FOR DEBUGGING
-    rho = 0.1f; // Or 0.01f, or 0.001f
-    std::cout << "Debug: Rho fixed for debugging. Current Rho: " << rho << std::endl;
-
-    std::cout << "Current new Rho: " + std::to_string(rho) + "\n";
+    // Currently using fixed rho for stability
+    rho = 0.1f;  // Try 0.01f or 0.2f for tuning
+    std::cout << "Debug: Rho fixed. Current Rho: " << rho << std::endl;
 }
 
 void BlindDeblurrer::updateAuxAndLagrange() {
     std::cout << "Debug: Entering updateAuxAndLagrange()...\n";
 
-    // Store previous values for s_norm calculation
+    // Save previous auxiliary values
     h_x.copyTo(h_x_prev);
     h_y.copyTo(h_y_prev);
     for (int k = 0; k < 6; ++k) {
         p_k[k].copyTo(p_k_prev[k]);
     }
 
+    // Compute gradients of L
     cv::Mat L_x, L_y;
     computeGradientX(L, L_x);
     computeGradientY(L, L_y);
 
-    std::cout << "DEBUG_AUX_L_GRAD: L_x norm: " << cv::norm(L_x) << ", L_y norm: " << cv::norm(L_y) << std::endl;
-    double min_Lx, max_Lx, min_Ly, max_Ly;
-    cv::minMaxLoc(L_x, &min_Lx, &max_Lx);
-    cv::minMaxLoc(L_y, &min_Ly, &max_Ly);
-    std::cout << "DEBUG_AUX_L_GRAD: L_x min/max: " << min_Lx << "/" << max_Lx << ", L_y min/max: " << min_Ly << "/" << max_Ly << std::endl;
+    float tau_grad = lambda1 / rho;
 
     // Update h_x
     cv::Mat term_h_x = L_x + lam_x / rho;
-    float tau_hx = lambda1 / rho;
-    std::cout << "DEBUG_AUX_HX: lambda1: " << lambda1 << ", rho: " << rho << ", tau_hx: " << tau_hx << std::endl;
-    h_x = shrink(term_h_x, tau_hx);
-    std::cout << "DEBUG_AUX_HX: h_x norm (after shrink): " << cv::norm(h_x) << std::endl;
-    std::cout << "DEBUG_AUX_HX: h_x_prev norm: " << cv::norm(h_x_prev) << std::endl;
-    std::cout << "DEBUG_AUX_HX: norm(h_x - h_x_prev): " << cv::norm(h_x - h_x_prev) << std::endl;
+    h_x = shrink(term_h_x, tau_grad);
 
     // Update h_y
     cv::Mat term_h_y = L_y + lam_y / rho;
-    float tau_hy = lambda1 / rho; // Should be same as tau_hx
-    std::cout << "DEBUG_AUX_HY: lambda1: " << lambda1 << ", rho: " << rho << ", tau_hy: " << tau_hy << std::endl;
-    h_y = shrink(term_h_y, tau_hy);
-    std::cout << "DEBUG_AUX_HY: h_y norm (after shrink): " << cv::norm(h_y) << std::endl;
-    std::cout << "DEBUG_AUX_HY: h_y_prev norm: " << cv::norm(h_y_prev) << std::endl;
-    std::cout << "DEBUG_AUX_HY: norm(h_y - h_y_prev): " << cv::norm(h_y - h_y_prev) << std::endl;
+    h_y = shrink(term_h_y, tau_grad);
 
+    // Update Lagrange multipliers for image gradients
+    lam_x += rho * (L_x - h_x);
+    lam_y += rho * (L_y - h_y);
 
-    // Update Lagrange Multipliers for Image Gradients
-    lam_x = lam_x + rho * (L_x - h_x);
-    lam_y = lam_y + rho * (L_y - h_y);
-    std::cout << "DEBUG_AUX_LAMBDA: lam_x norm: " << cv::norm(lam_x) << ", lam_y norm: " << cv::norm(lam_y) << std::endl;
-
-
-    // Update p_k (Auxiliary Variables for Kernel Gradients)
-    std::vector<cv::Mat> f_Dk_rho(6); // To store Dk*f for r_norm calculation
+    std::vector<cv::Mat> f_Dk_rho(6);
     for (int k = 0; k < 6; ++k) {
         cv::Mat f_Dk;
         cv::filter2D(f, f_Dk, -1, spatial_deriv_kernels[k], cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
-        
-        // Store for r_norm calculation
         f_Dk.copyTo(f_Dk_rho[k]);
 
-        // Debug f_Dk norms
-        double min_fDk, max_fDk;
-        cv::minMaxLoc(f_Dk, &min_fDk, &max_fDk);
-        std::cout << "DEBUG_AUX_PK[" << k << "]: f_Dk norm: " << cv::norm(f_Dk) << ", min/max: " << min_fDk << "/" << max_fDk << std::endl;
-
+        float tau_pk = lambda2 / (rho * zeta_k[k]);
         cv::Mat term_p_k = f_Dk + psi_k[k] / rho;
-        float tau_pk = lambda2 / rho / zeta_k[k];
-        std::cout << "DEBUG_AUX_PK[" << k << "]: lambda2: " << lambda2 << ", rho: " << rho << ", zeta_k[" << k << "]: " << zeta_k[k] << ", tau_pk: " << tau_pk << std::endl;
-        p_k[k] = shrink(term_p_k, tau_pk);
-        std::cout << "DEBUG_AUX_PK[" << k << "]: p_k norm (after shrink): " << cv::norm(p_k[k]) << std::endl;
-        std::cout << "DEBUG_AUX_PK[" << k << "]: p_k_prev[" << k << "] norm: " << cv::norm(p_k_prev[k]) << std::endl;
-        std::cout << "DEBUG_AUX_PK[" << k << "]: norm(p_k[" << k << "] - p_k_prev[" << k << "]): " << cv::norm(p_k[k] - p_k_prev[k]) << std::endl;
 
-        // Update Lagrange Multipliers for Kernel Gradients
-        psi_k[k] = psi_k[k] + rho * (f_Dk - p_k[k]);
-        std::cout << "DEBUG_AUX_PSI[" << k << "]: psi_k norm: " << cv::norm(psi_k[k]) << std::endl;
+        float tau = std::max(1e-4f, lambda2 / (rho * zeta_k[k]));
+        p_k[k] = shrink(f_Dk + psi_k[k] / rho, tau);
+
+        psi_k[k] += rho * (f_Dk - p_k[k]);
     }
 
-    // Update Rho (Adaptive Parameter)
+    double min_f, max_f;
+    cv::minMaxLoc(f, &min_f, &max_f);
+    std::cout << "DEBUG_KERNEL: f min: " << min_f << ", max: " << max_f << ", sum: " << cv::sum(f)[0] << std::endl;
+
     updateRho(L_x, L_y, f_Dk_rho);
-    std::cout << "ADMM Rho: " << rho << ", Effective Lambda1 Tau: " << lambda1 / rho << std::endl;
-    std::cout << "Debug: Exiting updateAuxAndLagrange() successfully.\n";
+
+    std::cout << "ADMM Rho: " << rho << ", Lambda1 Tau: " << lambda1 / rho << std::endl;
+    std::cout << "Debug: updateAuxAndLagrange() complete.\n";
 }

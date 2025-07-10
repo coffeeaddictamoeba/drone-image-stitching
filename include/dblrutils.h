@@ -64,3 +64,5 @@ void checkExactZero(const cv::Mat& m);
  cv::Mat divideComplex(const cv::Mat& numerator, const cv::Mat& denominator);
 
 void printMatStats(const cv::Mat& mat, const std::string& name);
+cv::Mat gaussianWindow(int size);
+void generateSyntheticBlur(const std::string& input_path, const std::string& output_blur_path, const std::string& output_kernel_path);

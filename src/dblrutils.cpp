@@ -178,3 +178,55 @@ void printMatStats(const cv::Mat& mat, const std::string& name) {
         std::cout << "DEBUG_STATS: " << name << " - Unknown channel count: " << mat.channels() << "\n";
     }
 }
+
+cv::Mat gaussianWindow(int size) {
+    cv::Mat window(size, size, CV_32F);
+    float sigma = size / 4.0f;
+    int center = size / 2;
+
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            float dx = x - center;
+            float dy = y - center;
+            window.at<float>(y, x) = std::exp(-(dx*dx + dy*dy) / (2 * sigma * sigma));
+        }
+    }
+    return window;
+}
+
+// Generate normalized Gaussian kernel
+cv::Mat createGaussianKernel2D(int size, double sigma) {
+    cv::Mat kernel1D = cv::getGaussianKernel(size, sigma, CV_32F);
+    cv::Mat kernel2D = kernel1D * kernel1D.t();
+    return kernel2D / cv::sum(kernel2D)[0];
+}
+
+// Apply known blur to a grayscale image
+void generateSyntheticBlur(const std::string& input_path, const std::string& output_blur_path, const std::string& output_kernel_path) {
+    cv::Mat img = cv::imread(input_path, cv::IMREAD_GRAYSCALE);
+    if (img.empty()) {
+        std::cerr << "Failed to load image.\n";
+        return;
+    }
+    img.convertTo(img, CV_32F, 1.0 / 255.0);
+
+    int kernel_size = 25;
+    double sigma = 3.0;
+
+    cv::Mat kernel = createGaussianKernel2D(kernel_size, sigma);
+    cv::Mat blurred;
+
+    // Apply blur with BORDER_REPLICATE to simulate real blur
+    cv::filter2D(img, blurred, -1, kernel, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+
+    // Save results
+    cv::imwrite(output_blur_path, blurred * 255);
+    double minVal, maxVal;
+    cv::minMaxLoc(kernel, &minVal, &maxVal);
+
+    cv::Mat kernel_visual;
+    kernel.convertTo(kernel_visual, CV_32F);
+    cv::imwrite(output_kernel_path, kernel_visual / maxVal * 255);
+
+    std::cout << "Synthetic blurred image and kernel saved.\n";
+}
