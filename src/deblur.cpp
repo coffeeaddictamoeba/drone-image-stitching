@@ -7,92 +7,83 @@
 
 void BlindDeblurrer::setupForScale(const cv::Mat& blurred_image_scale, int initial_kernel_size) {
     current_img_size = blurred_image_scale.size();
-    rho = 1.0f;
 
-    if (initial_kernel_size % 2 == 0) initial_kernel_size++;
+    if (initial_kernel_size % 2 == 0) ++initial_kernel_size; // Ensure kernel size is odd
 
-    // Ensure blurred image is converted to [0,1] float range
+    // Convert input image to [0,1] float
     cv::Mat blurred_normalized;
-    if (blurred_image_scale.depth() == CV_8U) {
-        blurred_image_scale.convertTo(blurred_normalized, CV_32F, 1.0 / 255.0);
-    } else if (blurred_image_scale.depth() == CV_16U) {
-        blurred_image_scale.convertTo(blurred_normalized, CV_32F, 1.0 / 65535.0);
-    } else {
-        blurred_image_scale.convertTo(blurred_normalized, CV_32F); // assumes it is already normalized or floating point
+    switch (blurred_image_scale.depth()) {
+        case CV_8U:
+            blurred_image_scale.convertTo(blurred_normalized, CV_32F, 1.0 / 255.0);
+            break;
+        case CV_16U:
+            blurred_image_scale.convertTo(blurred_normalized, CV_32F, 1.0 / 65535.0);
+            break;
+        default:
+            blurred_image_scale.convertTo(blurred_normalized, CV_32F);
     }
 
+    // Initialize L
     cv::Mat L_init;
     cv::Laplacian(blurred_normalized, L_init, CV_32F, 3);
     L = blurred_normalized - 0.5f * L_init;
-
-    // Clip L to [0,1]
     cv::threshold(L, L, 0.0f, 0.0f, cv::THRESH_TOZERO);
     cv::threshold(L, L, 1.0f, 1.0f, cv::THRESH_TRUNC);
 
+    // Initialize kernel f
     f = createInitialImpulseKernel(initial_kernel_size);
-    cv::Size kernel_actual_size = f.size();
+    cv::Size kernel_size = f.size();
 
-    h_x = cv::Mat::zeros(current_img_size, CV_32F);
-    h_y = cv::Mat::zeros(current_img_size, CV_32F);
-    lam_x = cv::Mat::zeros(current_img_size, CV_32F);
-    lam_y = cv::Mat::zeros(current_img_size, CV_32F);
+    // Initialize auxiliary variables and Lagrange multipliers
+    auto zeroImage = [&](cv::Size sz) { return cv::Mat::zeros(sz, CV_32F); };
+    h_x = zeroImage(current_img_size);
+    h_y = zeroImage(current_img_size);
+    lam_x = zeroImage(current_img_size);
+    lam_y = zeroImage(current_img_size);
+    h_x_prev = zeroImage(current_img_size);
+    h_y_prev = zeroImage(current_img_size);
 
-    p_k.resize(6);
-    psi_k.resize(6);
+    p_k.resize(6); psi_k.resize(6); p_k_prev.resize(6); zeta_k.assign(6, 1.0f);
     for (int i = 0; i < 6; ++i) {
-        p_k[i] = cv::Mat::zeros(kernel_actual_size, CV_32F);
-        psi_k[i] = cv::Mat::zeros(kernel_actual_size, CV_32F);
+        p_k[i] = zeroImage(kernel_size);
+        psi_k[i] = zeroImage(kernel_size);
+        p_k_prev[i] = zeroImage(kernel_size);
     }
 
-    h_x_prev = cv::Mat::zeros(current_img_size, CV_32F);
-    h_y_prev = cv::Mat::zeros(current_img_size, CV_32F);
-    p_k_prev.resize(6);
-    for (int i = 0; i < 6; ++i) {
-        p_k_prev[i] = cv::Mat::zeros(kernel_actual_size, CV_32F);
-    }
+    // Compute optimal DFT size and pad images
+    current_dft_size = getOptimalDFTSize(
+        cv::Size(current_img_size.width + initial_kernel_size - 1,
+                 current_img_size.height + initial_kernel_size - 1)
+    );
 
-    zeta_k.assign(6, 1.0f);
+    current_padded_blurred = padToSize(blurred_normalized, current_dft_size);
+    current_padded_L = padToSize(L, current_dft_size);
 
-    int required_dft_height = current_img_size.height + initial_kernel_size - 1;
-    int required_dft_width = current_img_size.width + initial_kernel_size - 1;
-    current_dft_size = getOptimalDFTSize(cv::Size(required_dft_width, required_dft_height));
-
-    cv::copyMakeBorder(blurred_normalized, current_padded_blurred,
-                       0, current_dft_size.height - current_img_size.height,
-                       0, current_dft_size.width - current_img_size.width,
-                       cv::BORDER_CONSTANT, cv::Scalar::all(0));
-
-    cv::copyMakeBorder(L, current_padded_L,
-                       0, current_dft_size.height - current_img_size.height,
-                       0, current_dft_size.width - current_img_size.width,
-                       cv::BORDER_CONSTANT, cv::Scalar::all(0));
-
+    // Initialize and place kernel into padded f
     current_padded_f = cv::Mat::zeros(current_dft_size, CV_32F);
-    
-    cv::Rect roi_initial_f_padded(0, 0, f.cols, f.rows);
-    f.copyTo(current_padded_f(roi_initial_f_padded));
+    f.copyTo(current_padded_f(cv::Rect(0, 0, kernel_size.width, kernel_size.height)));
 
-    computeDerivativeFiltersFFTs();
     initializeSpatialDerivativeKernels();
-    computeLocalSmoothnessMask(blurred_image_scale);
+    computeDerivativeFiltersFFTs();
+    computeLocalSmoothnessMask(blurred_normalized);  // use normalized input
 }
 
 // Create a 2D Gaussian kernel centered at (center, center)
 cv::Mat BlindDeblurrer::createInitialImpulseKernel(int size) {
-    cv::Mat kernel = cv::Mat::zeros(size, size, CV_32F);
-    int center = size / 2;
-    float sigma = size / 6.0f;
+    CV_Assert(size % 2 == 1);
+    cv::Mat kernel(size, size, CV_32F);
 
-    for (int y = 0; y < size; ++y) {
+    const int center = size / 2;
+    const float sigma2 = (size / 6.0f) * (size / 6.0f);
+
+    for (int y = 0; y < size; ++y)
         for (int x = 0; x < size; ++x) {
             float dx = x - center;
             float dy = y - center;
-            kernel.at<float>(y, x) = std::exp(-(dx * dx + dy * dy) / (2 * sigma * sigma));
+            kernel.at<float>(y, x) = std::exp(-(dx * dx + dy * dy) / (2 * sigma2));
         }
-    }
-    // Normalize kernel
-    kernel /= cv::sum(kernel)[0];
 
+    kernel /= cv::sum(kernel)[0];
     return kernel;
 }
 
@@ -123,9 +114,13 @@ void BlindDeblurrer::computeGradientY(const cv::Mat& input, cv::Mat& output) {
     cv::filter2D(input, output, -1, kernel_y, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
 }
 
-void BlindDeblurrer::padImageForDFT(const cv::Mat& input, cv::Mat& padded_output, cv::Size& dft_size) {
-    dft_size = getOptimalDFTSize(input.size());
-    cv::copyMakeBorder(input, padded_output, 0, dft_size.height - input.rows, 0, dft_size.width - input.cols, cv::BORDER_CONSTANT, cv::Scalar::all(0));
+cv::Mat BlindDeblurrer::padToSize(const cv::Mat& input, const cv::Size& target_size) {
+    cv::Mat padded;
+    int pad_bottom = target_size.height - input.rows;
+    int pad_right = target_size.width - input.cols;
+
+    cv::copyMakeBorder(input, padded, 0, pad_bottom, 0, pad_right, cv::BORDER_CONSTANT, cv::Scalar::all(0));
+    return padded;
 }
 
 void BlindDeblurrer::computeDerivativeFiltersFFTs() {
@@ -204,495 +199,325 @@ void BlindDeblurrer::initializeSpatialDerivativeKernels() {
 // --- L-step ---
 LStepFFTInputsContainer BlindDeblurrer::prepareLStepInputsAndFFTs() {
     LStepFFTInputsContainer inputs;
+    cv::Rect roi_img(0, 0, current_img_size.width, current_img_size.height);
+    cv::Rect roi_ker(0, 0, p_k[0].cols, p_k[0].rows);
 
-    // Allocate padded matrices for h_x_prime and h_y_prime once
-    cv::Mat h_x_prime_padded = cv::Mat::zeros(current_dft_size, CV_32F);
-    cv::Mat h_y_prime_padded = cv::Mat::zeros(current_dft_size, CV_32F);
+    cv::Mat h_x_prime = h_x - lam_x / rho;
+    cv::Mat h_y_prime = h_y - lam_y / rho;
 
-    // Define ROI for image-sized Mats once
-    cv::Rect roi_image(0, 0, current_img_size.width, current_img_size.height);
+    // Pad for FFT
+    inputs.F_h_x_prime = fft2dWithPad(h_x_prime, current_dft_size, roi_img);
+    inputs.F_h_y_prime = fft2dWithPad(h_y_prime, current_dft_size, roi_img);
 
-    // FIX: Explicitly evaluate MatExpr to a cv::Mat before copyTo
-    cv::Mat h_x_prime_unpadded_eval = h_x - lam_x / rho;
-    h_x_prime_unpadded_eval.copyTo(h_x_prime_padded(roi_image));
-
-    cv::Mat h_y_prime_unpadded_eval = h_y - lam_y / rho;
-    h_y_prime_unpadded_eval.copyTo(h_y_prime_padded(roi_image));
-
-    // Prepare p_k_prime_padded and its FFTs
     inputs.F_p_k_prime.resize(6);
-    
-    // Define ROI for kernel-sized Mats once
-    cv::Rect roi_kernel(0, 0, p_k[0].cols, p_k[0].rows);
-
     for (int k = 0; k < 6; ++k) {
-        cv::Mat p_k_prime_unpadded_eval = p_k[k] - psi_k[k] / rho;
-        
-        cv::Mat p_k_prime_padded_temp = cv::Mat::zeros(current_dft_size, CV_32F);
-        p_k_prime_unpadded_eval.copyTo(p_k_prime_padded_temp(roi_kernel));
-        fft2d(p_k_prime_padded_temp, inputs.F_p_k_prime[k]);
+        cv::Mat pk_prime = p_k[k] - psi_k[k] / rho;
+        inputs.F_p_k_prime[k] = fft2dWithPad(pk_prime, current_dft_size, roi_ker);
     }
 
-    // Perform FFTs for h_x_prime and h_y_prime
-    fft2d(h_x_prime_padded, inputs.F_h_x_prime);
-    fft2d(h_y_prime_padded, inputs.F_h_y_prime);
-
+    // Image and kernel FFTs
     fft2d(current_padded_blurred, inputs.F_I);
     fft2d(current_padded_f, inputs.F_f);
 
-    cv::Scalar img_mean, img_std;
-    cv::meanStdDev(current_padded_blurred, img_mean, img_std);
-    std::cout << "DEBUG: Padded blurred image mean (L-step): " << img_mean[0] << ", stddev: " << img_std[0] << std::endl;
-
-    cv::Mat F_f_planes[2];
-    cv::split(inputs.F_f, F_f_planes); // F_f is CV_32FC2
-    F_f_planes[1] = -F_f_planes[1]; // Negate imaginary part
-    cv::merge(F_f_planes, 2, inputs.F_f_conj_64FC2); // Merge into a 32FC2 temporary
-    inputs.F_f_conj_64FC2.convertTo(inputs.F_f_conj_64FC2, CV_64FC2);
-
+    // Precompute F_f conjugate
+    inputs.F_f_conj_64FC2 = conj64F(inputs.F_f);
     return inputs;
 }
 
-cv::Mat BlindDeblurrer::computeLNumerator(const LStepFFTInputsContainer& inputs) {
-    cv::Mat F_I_64FC2;
-    inputs.F_I.convertTo(F_I_64FC2, CV_64FC2);
-
+cv::Mat BlindDeblurrer::computeLNumerator(const LStepFFTInputsContainer& in) {
+    // Term 1: conj(F_f) * F_I
+    cv::Mat F_I_64F;
+    in.F_I.convertTo(F_I_64F, CV_64FC2);
     cv::Mat term1;
-    cv::mulSpectrums(F_I_64FC2, inputs.F_f_conj_64FC2, term1, 0, false);
+    cv::mulSpectrums(F_I_64F, in.F_f_conj_64FC2, term1, 0, false);
 
-    cv::Mat F_Dx_conj, F_Dy_conj;
-    cv::Mat F_Dx_planes_temp[2], F_Dy_planes_temp[2];
+    // Term 2: conj(F_Dx) * F_h_x_prime + conj(F_Dy) * F_h_y_prime
+    cv::Mat F_Dx_conj = conj64F(F_deriv_filters[1]);
+    cv::Mat F_Dy_conj = conj64F(F_deriv_filters[2]);
 
-    cv::Mat F_deriv_filter_1_64FC2, F_deriv_filter_2_64FC2;
-    this->F_deriv_filters[1].convertTo(F_deriv_filter_1_64FC2, CV_64FC2);
-    this->F_deriv_filters[2].convertTo(F_deriv_filter_2_64FC2, CV_64FC2);
+    cv::Mat F_h_x_64F, F_h_y_64F;
+    in.F_h_x_prime.convertTo(F_h_x_64F, CV_64FC2);
+    in.F_h_y_prime.convertTo(F_h_y_64F, CV_64FC2);
 
-    cv::split(F_deriv_filter_1_64FC2, F_Dx_planes_temp); F_Dx_planes_temp[1] = -F_Dx_planes_temp[1]; cv::merge(F_Dx_planes_temp, 2, F_Dx_conj);
-    cv::split(F_deriv_filter_2_64FC2, F_Dy_planes_temp); F_Dy_planes_temp[1] = -F_Dy_planes_temp[1]; cv::merge(F_Dy_planes_temp, 2, F_Dy_conj);
+    cv::Mat term2x, term2y;
+    cv::mulSpectrums(F_h_x_64F, F_Dx_conj, term2x, 0, false);
+    cv::mulSpectrums(F_h_y_64F, F_Dy_conj, term2y, 0, false);
+    cv::Mat term2 = rho * (term2x + term2y);
 
-    cv::Mat F_h_x_prime_64FC2, F_h_y_prime_64FC2;
-    inputs.F_h_x_prime.convertTo(F_h_x_prime_64FC2, CV_64FC2);
-    inputs.F_h_y_prime.convertTo(F_h_y_prime_64FC2, CV_64FC2);
-   
-    cv::Mat term2_part_x, term2_part_y;
-    cv::mulSpectrums(F_h_x_prime_64FC2, F_Dx_conj, term2_part_x, 0, false);
-    cv::mulSpectrums(F_h_y_prime_64FC2, F_Dy_conj, term2_part_y, 0, false);
-    cv::Mat term2 = (term2_part_x + term2_part_y) * rho;
-    
+    // Term 3: sum_k conj(F_Dk) * F_p_k_prime
     cv::Mat term3 = cv::Mat::zeros(current_dft_size, CV_64FC2);
     for (int k = 0; k < 6; ++k) {
-        cv::Mat F_deriv_k_64FC2;
-        this->F_deriv_filters[k].convertTo(F_deriv_k_64FC2, CV_64FC2);
-        
-        cv::Mat F_deriv_k_conj;
-        cv::Mat F_deriv_k_planes_temp[2];
-        cv::split(F_deriv_k_64FC2, F_deriv_k_planes_temp); F_deriv_k_planes_temp[1] = -F_deriv_k_planes_temp[1]; cv::merge(F_deriv_k_planes_temp, 2, F_deriv_k_conj);
-       
-        cv::Mat F_p_k_prime_64FC2;
-        inputs.F_p_k_prime[k].convertTo(F_p_k_prime_64FC2, CV_64FC2);
-        
-        cv::Mat temp_term;
-        cv::mulSpectrums(F_p_k_prime_64FC2, F_deriv_k_conj, temp_term, 0, false);
-        term3 += temp_term;
+        cv::Mat F_Dk_conj = conj64F(F_deriv_filters[k]);
+        cv::Mat F_p_k_64F;
+        in.F_p_k_prime[k].convertTo(F_p_k_64F, CV_64FC2);
+
+        cv::Mat prod;
+        cv::mulSpectrums(F_p_k_64F, F_Dk_conj, prod, 0, false);
+        term3 += prod;
     }
     term3 *= rho;
 
-    cv::Mat numerator_fft = term1 + term2 + term3;
-
-    double min_num_fft, max_num_fft;
-    cv::minMaxLoc(numerator_fft, &min_num_fft, &max_num_fft);
-    std::cout << "Debug: Numerator FFT (Complex) - Min Val: " << min_num_fft << ", Max Val: " << max_num_fft << std::endl;
-
-    cv::Vec2d dc_num = numerator_fft.at<cv::Vec2d>(0, 0);
-    std::cout << "Debug: Numerator FFT DC component (0,0): (" << dc_num[0] << ", " << dc_num[1] << ")" << "\n";
-
-    return numerator_fft;
+    return term1 + term2 + term3;
 }
 
 cv::Mat BlindDeblurrer::computeLDenominator(const cv::Mat& F_f) {
-    cv::Mat F_f_mag_sq;
-    cv::Mat F_f_planes_temp_64F[2];
-    cv::Mat F_f_planes_32F[2];
-    cv::split(F_f, F_f_planes_32F);
-    F_f_planes_32F[0].convertTo(F_f_planes_temp_64F[0], CV_64F);
-    F_f_planes_32F[1].convertTo(F_f_planes_temp_64F[1], CV_64F);
-    cv::magnitude(F_f_planes_temp_64F[0], F_f_planes_temp_64F[1], F_f_mag_sq);
-    F_f_mag_sq = F_f_mag_sq.mul(F_f_mag_sq);
+    cv::Mat F_f_64F;
+    F_f.convertTo(F_f_64F, CV_64FC2);
 
-    cv::Mat F_Dx_real, F_Dx_imag, F_Dx_mag_sq;
-    cv::Mat F_Dy_real, F_Dy_imag, F_Dy_mag_sq;
+    // Term 1: |F_f|^2
+    cv::Mat f_mag = magSq64F(F_f_64F);
 
-    cv::Mat F_deriv_filter_1_64FC2, F_deriv_filter_2_64FC2;
-    this->F_deriv_filters[1].convertTo(F_deriv_filter_1_64FC2, CV_64FC2);
-    this->F_deriv_filters[2].convertTo(F_deriv_filter_2_64FC2, CV_64FC2);
+    // Term 2: rho * (|F_Dx|^2 + |F_Dy|^2)
+    cv::Mat D_x = magSq64F(F_deriv_filters[1]);
+    cv::Mat D_y = magSq64F(F_deriv_filters[2]);
+    cv::Mat term2 = rho * (D_x + D_y);
 
-    cv::Mat split_temp_dx[2];
-    cv::split(F_deriv_filter_1_64FC2, split_temp_dx);
-    F_Dx_real = split_temp_dx[0];
-    F_Dx_imag = split_temp_dx[1];
-    cv::magnitude(F_Dx_real, F_Dx_imag, F_Dx_mag_sq);
-    F_Dx_mag_sq = F_Dx_mag_sq.mul(F_Dx_mag_sq);
-
-    cv::Mat split_temp_dy[2]; // Will be CV_64F
-    cv::split(F_deriv_filter_2_64FC2, split_temp_dy);
-    F_Dy_real = split_temp_dy[0];
-    F_Dy_imag = split_temp_dy[1];
-    cv::magnitude(F_Dy_real, F_Dy_imag, F_Dy_mag_sq);
-    F_Dy_mag_sq = F_Dy_mag_sq.mul(F_Dy_mag_sq);
-
-    cv::Mat term2_den = (F_Dx_mag_sq + F_Dy_mag_sq) * rho;
-
-    cv::Mat term3_den = cv::Mat::zeros(current_dft_size, CV_64F);
+    // Term 3: rho * sum_k |F_Dk|^2
+    cv::Mat term3 = cv::Mat::zeros(current_dft_size, CV_64F);
     for (int k = 0; k < 6; ++k) {
-        cv::Mat F_deriv_k_64FC2;
-        this->F_deriv_filters[k].convertTo(F_deriv_k_64FC2, CV_64FC2);
-
-        cv::Mat F_deriv_k_real, F_deriv_k_imag, F_deriv_k_mag_sq;
-        cv::Mat split_temp_k[2];
-        cv::split(F_deriv_k_64FC2, split_temp_k);
-        F_deriv_k_real = split_temp_k[0];
-        F_deriv_k_imag = split_temp_k[1];
-        cv::magnitude(F_deriv_k_real, F_deriv_k_imag, F_deriv_k_mag_sq);
-        F_deriv_k_mag_sq = F_deriv_k_mag_sq.mul(F_deriv_k_mag_sq);
-        term3_den += F_deriv_k_mag_sq;
+        term3 += magSq64F(F_deriv_filters[k]);
     }
-    term3_den *= rho;
+    term3 *= rho;
 
-    cv::Mat denominator_fft_real_before_max = F_f_mag_sq + term2_den + term3_den;
+    cv::Mat denom_real = f_mag + term2 + term3;
+    cv::max(denom_real, 1e-6, denom_real); // stability
 
-    cv::Mat denominator_fft_real;
-    cv::max(denominator_fft_real_before_max, 1e-6, denominator_fft_real); // small constant for stability
-
-    cv::Mat denom_planes[] = {denominator_fft_real, cv::Mat::zeros(current_dft_size, CV_64F)};
-
-    cv::Mat denominator_fft_complex;
-    cv::merge(denom_planes, 2, denominator_fft_complex);
-
-    cv::Vec2d dc_denom = denominator_fft_complex.at<cv::Vec2d>(0, 0);
-    std::cout << "Debug: Denominator FFT DC component (0,0): (" << dc_denom[0] << ", " << dc_denom[1] << ")" << std::endl;
-
-    return denominator_fft_complex;
+    // Merge into complex with 0 imaginary
+    return mergeRealImag(denom_real, cv::Mat::zeros(current_dft_size, CV_64F));
 }
 
 void BlindDeblurrer::performLStepIFFTAndPostProcess(const cv::Mat& F_L_updated) {
-    cv::Mat F_L_updated_ifft;
-    ifft2d(F_L_updated, F_L_updated_ifft);
+    cv::Mat spatial_complex;
+    ifft2d(F_L_updated, spatial_complex);
 
-    cv::Mat ifft_planes[2];
-    cv::split(F_L_updated_ifft, ifft_planes);
-    cv::Mat real_part = ifft_planes[0];  // This is real spatial-domain image
+    std::vector<cv::Mat> planes;
+    cv::split(spatial_complex, planes);
 
-    double min_L_padded, max_L_padded;
-    cv::minMaxLoc(real_part, &min_L_padded, &max_L_padded); // Use the real part for min/max
-    std::cout << "Debug: L_updated_padded (After IFFT, before clipping) - Min Val: " << min_L_padded << ", Max Val: " << max_L_padded << std::endl;
-    std::cout << "Debug: L_updated_padded (After IFFT) - Norm of real part: " << cv::norm(real_part) << std::endl;
+    if (!planes[1].empty()) {
+        double imag_max;
+        cv::minMaxLoc(cv::abs(planes[1]), nullptr, &imag_max);
+        CV_Assert(imag_max < 1e-3 && "IFFT imaginary part too large — instability?");
+    }
 
+    cv::Mat L_updated = planes[0](cv::Rect(0, 0, current_img_size.width, current_img_size.height)).clone();
+    cv::threshold(L_updated, L_updated, 0.0f, 0.0f, cv::THRESH_TOZERO);
+    cv::threshold(L_updated, L_updated, 1.0f, 1.0f, cv::THRESH_TRUNC);
 
-    L = real_part(cv::Rect(0, 0, current_img_size.width, current_img_size.height)).clone();
-    L.convertTo(L, CV_32F);
+    if (cv::countNonZero(cv::abs(L_updated) > 10.0f)) {
+        std::cerr << "[WARN] L has very large values — possible divergence." << std::endl;
+    }
 
-    double min_L_cropped, max_L_cropped;
-    cv::minMaxLoc(L, &min_L_cropped, &max_L_cropped);
-    std::cout << "DEBUG_LSTEP_POST: L (after crop, before clip) Min: " << min_L_cropped << ", Max: " << max_L_cropped << ", Norm: " << cv::norm(L) << std::endl;
-
-    cv::threshold(L, L, 0.0, 0.0, cv::THRESH_TOZERO);     // Remove negatives
-    cv::threshold(L, L, 1.0, 1.0, cv::THRESH_TRUNC);      // Cap at 1.0
-
-    double min_L_clipped, max_L_clipped;
-    cv::minMaxLoc(L, &min_L_clipped, &max_L_clipped);
-    std::cout << "DEBUG_LSTEP_POST: L (after clipping) Min: " << min_L_clipped << ", Max: " << max_L_clipped << ", Norm: " << cv::norm(L) << std::endl;
-
-    current_padded_L = cv::Mat::zeros(current_dft_size, CV_32F);
-    cv::Rect roi_L_pad(0, 0, current_img_size.width, current_img_size.height);
-    L.copyTo(current_padded_L(roi_L_pad));
+    L = L_updated;
+    current_padded_L = padToSize(L, current_dft_size);
 }
 
 void BlindDeblurrer::updateLStep() {
-    std::cout << "Debug: Entering updateLStep()...\n";
+    std::cout << "[L-Step] Starting...\n";
 
-    // Initial L state
-    double min_L_before, max_L_before;
-    cv::minMaxLoc(L, &min_L_before, &max_L_before);
-    std::cout << "DEBUG_LSTEP: L (before update) Min: " << min_L_before << ", Max: " << max_L_before << ", Norm: " << cv::norm(L) << std::endl;
+    auto inputs = prepareLStepInputsAndFFTs();
+    auto numerator_fft = computeLNumerator(inputs);
+    auto denominator_fft = computeLDenominator(inputs.F_f);
 
-    LStepFFTInputsContainer inputs = prepareLStepInputsAndFFTs();
-    
-    double min_F_f, max_F_f, min_F_I, max_F_I;
-    cv::minMaxLoc(inputs.F_f, &min_F_f, &max_F_f);
-    cv::minMaxLoc(inputs.F_I, &min_F_I, &max_F_I);
-    std::cout << "DEBUG_LSTEP_FFT_INPUTS: F_f (kernel FFT) Min: " << min_F_f << ", Max: " << max_F_f << ", Norm: " << cv::norm(inputs.F_f) << std::endl;
-    std::cout << "DEBUG_LSTEP_FFT_INPUTS: F_I (blurred image FFT) Min: " << min_F_I << ", Max: " << max_F_I << ", Norm: " << cv::norm(inputs.F_I) << std::endl;
+    cv::Mat F_L_updated = divideComplex(numerator_fft, denominator_fft);
 
-    cv::Mat numerator_fft = computeLNumerator(inputs);
-    cv::Mat denominator_fft_complex = computeLDenominator(inputs.F_f);
-
-    double min_num, max_num, min_den, max_den;
-    cv::minMaxLoc(numerator_fft, &min_num, &max_num);
-    cv::minMaxLoc(denominator_fft_complex, &min_den, &max_den);
-    std::cout << "DEBUG_LSTEP_NUM_DEN: Numerator FFT Min: " << min_num << ", Max: " << max_num << ", Norm: " << cv::norm(numerator_fft) << std::endl;
-    std::cout << "DEBUG_LSTEP_NUM_DEN: Denominator FFT Min: " << min_den << ", Max: " << max_den << ", Norm: " << cv::norm(denominator_fft_complex) << std::endl;
-
-
-    cv::Mat F_L_updated = divideComplex(numerator_fft, denominator_fft_complex);
-
-    double min_F_L_updated, max_F_L_updated;
-    cv::minMaxLoc(F_L_updated, &min_F_L_updated, &max_F_L_updated);
-    std::cout << "Debug: F_L_updated (After division, before IFFT) - Min Val: " << min_F_L_updated << ", Max Val: " << max_F_L_updated << ", Norm: " << cv::norm(F_L_updated) << std::endl;
-    
-    cv::Vec2d dc_fl_updated = F_L_updated.at<cv::Vec2d>(0, 0);
-    std::cout << "DEBUG_LSTEP: F_L_updated DC component (0,0): (" << dc_fl_updated[0] << ", " << dc_fl_updated[1] << ")" << std::endl;
+    if (!cv::checkRange(F_L_updated)) {
+        std::cerr << "[ERROR] F_L_updated contains NaNs or infs!\n";
+        return;
+    }
 
     performLStepIFFTAndPostProcess(F_L_updated);
-
-    double min_L_after, max_L_after;
-    cv::minMaxLoc(L, &min_L_after, &max_L_after);
-    std::cout << "DEBUG_LSTEP: L (after update and clipping) Min: " << min_L_after << ", Max: " << max_L_after << ", Norm: " << cv::norm(L) << std::endl;
-    cv::Mat L_before = L.clone();
-    double delta = cv::norm(L - L_before);
-    std::cout << "DEBUG_LSTEP: norm(L - current_img_size_L_before): " << delta << std::endl; // Needs a copy of L before update to compare
-
-    std::cout << "Debug: updateLStep() completed successfully." << std::endl;
+    std::cout << "[L-Step] Completed.\n";
 }
 
 // --- F-Step ---
 FStepFFTInputsContainer BlindDeblurrer::prepareFStepInputsAndFFTs() {
     FStepFFTInputsContainer inputs;
+    cv::Rect roi_kernel(0, 0, f.cols, f.rows);
 
-    cv::Mat current_padded_L_64F;
-    current_padded_L.convertTo(current_padded_L_64F, CV_64F);   
+    // Convert and FFT padded L
+    cv::Rect roi_L(0, 0, current_padded_L.cols, current_padded_L.rows);
+    inputs.F_L = fft2dWithPad(current_padded_L, current_dft_size, roi_L);
 
-    fft2d(current_padded_L_64F, inputs.F_L);
+    // Convert and FFT padded blurred image
+    cv::Mat blurred_64F;
+    current_padded_blurred.convertTo(blurred_64F, CV_64F);
+    fft2d(blurred_64F, inputs.F_I_64FC2);
 
-    cv::Mat current_padded_blurred_64F;
-    current_padded_blurred.convertTo(current_padded_blurred_64F, CV_64F);
-    fft2d(current_padded_blurred_64F, inputs.F_I_64FC2);
-
-    cv::Scalar img_mean, img_std;
-    cv::meanStdDev(current_padded_blurred, img_mean, img_std);
-    std::cout << "DEBUG: Padded blurred image mean (F-step): " << img_mean[0] << ", stddev: " << img_std[0] << std::endl;
-
+    // FFT of padded p_k
     inputs.F_p_k.resize(6);
     for (int k = 0; k < 6; ++k) {
-        cv::Mat p_k_converted;
-        p_k[k].convertTo(p_k_converted, CV_64F);
-
-        cv::Mat p_k_padded_64F = cv::Mat::zeros(current_dft_size, CV_64F);
-        cv::Rect roi_p_k(0, 0, p_k[k].cols, p_k[k].rows);
-        p_k_converted.copyTo(p_k_padded_64F(roi_p_k));
-
-        fft2d(p_k_padded_64F, inputs.F_p_k[k]);
+        inputs.F_p_k[k] = fft2dWithPad(p_k[k], current_dft_size, roi_kernel);
     }
+
     return inputs;
 }
 
-cv::Mat BlindDeblurrer::computeFNumerator(const FStepFFTInputsContainer& inputs) {
-    // Term 1: F_L_conj * F_I (element-wise multiplication)
-    cv::Mat term1_num;
-    cv::mulSpectrums(inputs.F_I_64FC2, inputs.F_L, term1_num, 0, true); // F_I * conj(F_L)
+cv::Mat BlindDeblurrer::computeFNumerator(const FStepFFTInputsContainer& in) {
+    // Term 1: conj(F_L) * F_I
+    cv::Mat F_L_conj = conj64F(in.F_L);
+    cv::Mat term1;
+    cv::mulSpectrums(F_L_conj, in.F_I_64FC2, term1, 0, false);
 
-    cv::Mat sum_of_Dk_Pk_terms = cv::Mat::zeros(current_dft_size, CV_64FC2);
-
+    // Term 2: sum_k conj(F_Dk) * F_p_k
+    cv::Mat term2 = cv::Mat::zeros(current_dft_size, CV_64FC2);
     for (int k = 0; k < 6; ++k) {
-        cv::Mat F_deriv_k_64FC2;
-        this->F_deriv_filters[k].convertTo(F_deriv_k_64FC2, CV_64FC2);
+        cv::Mat F_Dk_conj = conj64F(F_deriv_filters[k]);
+        cv::Mat F_p_k_64F;
+        in.F_p_k[k].convertTo(F_p_k_64F, CV_64FC2);
 
-        cv::Mat temp_term; // conj(F_Dk) * F_Pk
-        cv::mulSpectrums(inputs.F_p_k[k], F_deriv_k_64FC2, temp_term, 0, true);
-        sum_of_Dk_Pk_terms += temp_term;
+        cv::Mat prod;
+        cv::mulSpectrums(F_p_k_64F, F_Dk_conj, prod, 0, false);
+        term2 += prod;
     }
 
-    cv::Mat numerator_fft = term1_num + sum_of_Dk_Pk_terms * rho;
-    return numerator_fft;
+    return term1 + rho * term2;
 }
 
-cv::Mat BlindDeblurrer::computeFDenominator(const FStepFFTInputsContainer& inputs) {
+cv::Mat BlindDeblurrer::computeFDenominator(const FStepFFTInputsContainer& in) {
     // Term 1: |F_L|^2
-    cv::Mat F_L_mag_sq;
-    cv::Mat F_L_real_part, F_L_imag_part;
-    cv::Mat F_L_planes[2];
-    cv::split(inputs.F_L, F_L_planes);
-    F_L_real_part = F_L_planes[0];
-    F_L_imag_part = F_L_planes[1];
-    cv::magnitude(F_L_real_part, F_L_imag_part, F_L_mag_sq); // Magnitude is sqrt(re^2 + im^2)
-    F_L_mag_sq = F_L_mag_sq.mul(F_L_mag_sq); // Square the magnitude to get |F_L|^2
+    cv::Mat mag_L_sq = magSq64F(in.F_L);
 
-    // Term 2: rho * SUM(|F_Dk|^2)
-    cv::Mat sum_of_Dk_mag_sq = cv::Mat::zeros(current_dft_size, CV_64F);
-
+    // Term 2: rho * sum_k |F_Dk|^2
+    cv::Mat sum_deriv_mag_sq = cv::Mat::zeros(current_dft_size, CV_64F);
     for (int k = 0; k < 6; ++k) {
-        cv::Mat F_deriv_k_64FC2;
-        this->F_deriv_filters[k].convertTo(F_deriv_k_64FC2, CV_64FC2);
-        
-        cv::Mat F_deriv_k_real, F_deriv_k_imag, F_deriv_k_mag_sq;
-        cv::Mat split_temp_k[2];
-        cv::split(F_deriv_k_64FC2, split_temp_k);
-        F_deriv_k_real = split_temp_k[0];
-        F_deriv_k_imag = split_temp_k[1];
-        cv::magnitude(F_deriv_k_real, F_deriv_k_imag, F_deriv_k_mag_sq);
-        F_deriv_k_mag_sq = F_deriv_k_mag_sq.mul(F_deriv_k_mag_sq); // |F_Dk|^2
-        sum_of_Dk_mag_sq += F_deriv_k_mag_sq;
+        sum_deriv_mag_sq += magSq64F(F_deriv_filters[k]);
     }
 
-    cv::Mat denominator_fft_real_before_max = F_L_mag_sq + sum_of_Dk_mag_sq * rho;
+    cv::Mat denom_real = mag_L_sq + rho * sum_deriv_mag_sq;
+    cv::max(denom_real, 1e-6, denom_real);
 
-    cv::Mat denominator_fft_real;
-    cv::max(denominator_fft_real_before_max, 1e-6, denominator_fft_real);
-
-    cv::Mat denom_planes[] = {denominator_fft_real, cv::Mat::zeros(current_dft_size, CV_64F)};
-
-    std::cout << "Debug: Before merge in computeFDenominator:\n";
-    std::cout << "  denominator_fft_real size: " << denominator_fft_real.size() << ", depth: " << denominator_fft_real.depth() << std::endl;
-    std::cout << "  Expected zero_mat size: " << current_dft_size << ", depth: " << CV_64F << std::endl;
-    std::cout << "  Zero_mat type: " << cv::Mat::zeros(current_dft_size, CV_64F).type() << std::endl; // For cross-check    
-
-    cv::Mat denominator_fft_complex;
-    cv::merge(denom_planes, 2, denominator_fft_complex);
-    
-
-    return denominator_fft_complex;
+    return mergeRealImag(denom_real, cv::Mat::zeros(current_dft_size, CV_64F));
 }
 
 void BlindDeblurrer::performFStepIFFTAndPostProcess(const cv::Mat& F_f_updated) {
-    cv::Mat f_updated_padded_complex;
-    ifft2d(F_f_updated, f_updated_padded_complex);
+    cv::Mat spatial_complex;
+    ifft2d(F_f_updated, spatial_complex);
 
-    cv::Mat planes[2];
-    cv::split(f_updated_padded_complex, planes); // planes[0] = real, planes[1] = imaginary
-    cv::Mat f_updated_padded_real = planes[0];
+    std::vector<cv::Mat> planes(2);
+    cv::split(spatial_complex, planes);
+    CV_Assert(planes[0].depth() == CV_64F);
 
-    cv::Rect kernel_roi(0, 0, f.cols, f.rows);
-    cv::Mat f_cropped = f_updated_padded_real(kernel_roi).clone();
+    // Use only real part
+    cv::Mat f_real = planes[0](cv::Rect(0, 0, f.cols, f.rows)).clone();
+    f_real.convertTo(f, CV_32F);
 
-    f_cropped.convertTo(f, CV_32F);
-    cv::threshold(f, f, 0.0f, 0.0f, cv::THRESH_TOZERO);
+    cv::threshold(f, f, 0.0f, 0.0f, cv::THRESH_TOZERO); // only positive
 
-    double kernel_sum = cv::sum(f)[0];
-    if (kernel_sum > std::numeric_limits<float>::epsilon()) {
-        f /= kernel_sum;
-    } else {
+    double sum_f = cv::sum(f)[0];
+    if (sum_f <= std::numeric_limits<float>::epsilon()) {
+        std::cerr << "[F-Step] Kernel degenerated. Reinitializing.\n";
         f = createInitialImpulseKernel(f.rows);
-        std::cerr << "Warning: Kernel sum was zero after F-step, reinitializing.\n";
+    } else {
+        f /= sum_f;
     }
 
-    centerKernel(f);
+    // Optional: regularization to encourage center bias
     f = f.mul(gaussianWindow(f.rows));
-    f = 0.9f * f + 0.1f * prior; 
     f /= cv::sum(f)[0];
 
     current_padded_f = cv::Mat::zeros(current_dft_size, CV_32F);
-    cv::Rect roi_f_in_padded(0, 0, f.cols, f.rows);
-    f.copyTo(current_padded_f(roi_f_in_padded));
+    f.copyTo(current_padded_f(cv::Rect(0, 0, f.cols, f.rows)));
 }
 
-
 void BlindDeblurrer::updateFStep() {
-    std::cout << "Executing one f-step iteration...\n";
+    std::cout << "[F-Step] Starting update...\n";
 
     FStepFFTInputsContainer inputs = prepareFStepInputsAndFFTs();
 
-    cv::Mat numerator_f_fft = computeFNumerator(inputs);
-    cv::Mat denominator_f_fft_complex = computeFDenominator(inputs);
-    
-    double min_f_denom_mag, max_f_denom_mag;
-    cv::Mat denom_mag_only;
-    
-    cv::Mat denom_planes[2];
-    cv::split(denominator_f_fft_complex, denom_planes); 
-    
-    cv::magnitude(denom_planes[0], denom_planes[1], denom_mag_only); // denom_planes[0] is real, denom_planes[1] is imag
-    
-    cv::minMaxLoc(denom_mag_only, &min_f_denom_mag, &max_f_denom_mag);
+    cv::Mat numerator_fft = computeFNumerator(inputs);
+    cv::Mat denominator_fft = computeFDenominator(inputs);
 
-    std::cout << "Debug: F-step Denominator FFT (complex) - Min Mag: " << min_f_denom_mag
-              << ", Max Mag: " << max_f_denom_mag << "\n";
-
-    cv::Mat F_f_updated = divideComplex(numerator_f_fft, denominator_f_fft_complex);
+    cv::Mat F_f_updated = divideComplex(numerator_fft, denominator_fft);
+    if (!cv::checkRange(F_f_updated)) {
+        std::cerr << "[F-Step] Error: Invalid FFT values (NaN or Inf).\n";
+        return;
+    }
 
     performFStepIFFTAndPostProcess(F_f_updated);
 
-    double debug_min_f, debug_max_f;
-    cv::minMaxLoc(f, &debug_min_f, &debug_max_f);
-
-    std::cout << "DEBUG: Kernel f max: " << debug_max_f
-          << ", sum: " << cv::sum(f)[0]
-          << ", norm: " << cv::norm(f) << "\n";
-
-    std::cout << "Debug: updateFStep() completed successfully.\n";
+    double min_f, max_f;
+    cv::minMaxLoc(f, &min_f, &max_f);
+    std::cout << "[F-Step] Kernel updated. Min: " << min_f << ", Max: " << max_f
+              << ", Sum: " << cv::sum(f)[0] << ", Norm: " << cv::norm(f) << "\n";
 }
 
 // --- Parameters update ---
 cv::Mat BlindDeblurrer::shrink(const cv::Mat& z, float tau) {
+    CV_Assert(z.type() == CV_32F);
+
     cv::Mat abs_z, sign_z, thresholded;
-    cv::absdiff(z, cv::Scalar(0), abs_z);
-
-    // (|z| - tau)_+
-    cv::Mat abs_minus_tau = abs_z - tau;
-    cv::max(abs_minus_tau, 0, thresholded);
-
-    // sign(z)
+    cv::absdiff(z, cv::Scalar(0), abs_z); // |z|
     sign_z = cv::Mat::zeros(z.size(), z.type());
     sign_z.setTo(1.0f, z > 0);
     sign_z.setTo(-1.0f, z < 0);
 
+    // (|z| - tau)_+
+    cv::subtract(abs_z, tau, thresholded);
+    cv::max(thresholded, 0, thresholded);
+
     return sign_z.mul(thresholded);
 }
 
-void BlindDeblurrer::updateRho(const cv::Mat& L_x_current, const cv::Mat& L_y_current, const std::vector<cv::Mat>& f_Dk_current) {
-    // Currently using fixed rho for stability
-    rho = 0.1f;  // Try 0.01f or 0.2f for tuning
-    std::cout << "Debug: Rho fixed. Current Rho: " << rho << std::endl;
+void BlindDeblurrer::updateRho(const cv::Mat&, const cv::Mat&, const std::vector<cv::Mat>&) {
+    // Fixed for now, adaptive strategy can be added later
+    rho = 0.1f;
+    std::cout << "[Rho Update] Using fixed rho = " << rho << "\n";
 }
 
 void BlindDeblurrer::updateAuxAndLagrange() {
-    std::cout << "Debug: Entering updateAuxAndLagrange()...\n";
+    std::cout << "[ADMM] Updating auxiliary and Lagrange variables...\n";
 
-    // Save previous auxiliary values
     h_x.copyTo(h_x_prev);
     h_y.copyTo(h_y_prev);
-    for (int k = 0; k < 6; ++k) {
+    for (int k = 0; k < 6; ++k)
         p_k[k].copyTo(p_k_prev[k]);
-    }
 
-    // Compute gradients of L
+    // Compute gradients L
     cv::Mat L_x, L_y;
     computeGradientX(L, L_x);
     computeGradientY(L, L_y);
 
-    float tau_grad = lambda1 / rho;
+    const float tau1 = lambda1 / rho;
 
-    // Update h_x
-    cv::Mat term_h_x = L_x + lam_x / rho;
-    h_x = shrink(term_h_x, tau_grad);
+    // Scale lambda by rho
+    cv::Mat lam_x_scaled, lam_y_scaled;
+    cv::divide(lam_x, rho, lam_x_scaled, 1, CV_32F);
+    cv::divide(lam_y, rho, lam_y_scaled, 1, CV_32F);
 
-    // Update h_y
-    cv::Mat term_h_y = L_y + lam_y / rho;
-    h_y = shrink(term_h_y, tau_grad);
+    // Ensure gradient is CV_32F
+    L_x.convertTo(L_x, CV_32F);
+    L_y.convertTo(L_y, CV_32F);
 
-    // Update Lagrange multipliers for image gradients
-    lam_x += rho * (L_x - h_x);
-    lam_y += rho * (L_y - h_y);
+    // Soft-threshold step for h_x, h_y
+    h_x = shrink(L_x + lam_x_scaled, tau1);
+    h_y = shrink(L_y + lam_y_scaled, tau1);
 
-    std::vector<cv::Mat> f_Dk_rho(6);
+    // Dual variable updates lam_x, lam_y
+    lam_x = lam_x + rho * (L_x - h_x);
+    lam_y = lam_y + rho * (L_y - h_y);
+
+    // Update f-derivatives and auxiliary vars p_k, psi_k
+    std::vector<cv::Mat> f_Dk_current(6);
     for (int k = 0; k < 6; ++k) {
-        cv::Mat f_Dk;
-        cv::filter2D(f, f_Dk, -1, spatial_deriv_kernels[k], cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
-        f_Dk.copyTo(f_Dk_rho[k]);
+        cv::filter2D(f, f_Dk_current[k], -1, spatial_deriv_kernels[k], cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
 
-        float tau_pk = lambda2 / (rho * zeta_k[k]);
-        cv::Mat term_p_k = f_Dk + psi_k[k] / rho;
+        const float tau2 = std::max(1e-4f, lambda2 / (rho * zeta_k[k]));
 
-        float tau = std::max(1e-4f, lambda2 / (rho * zeta_k[k]));
-        p_k[k] = shrink(f_Dk + psi_k[k] / rho, tau);
+        cv::Mat psi_scaled;
+        cv::divide(psi_k[k], rho, psi_scaled, 1, CV_32F);
 
-        psi_k[k] += rho * (f_Dk - p_k[k]);
+        cv::Mat fk_plus = f_Dk_current[k] + psi_scaled;
+        p_k[k] = shrink(fk_plus, tau2);
+
+        psi_k[k] = psi_k[k] + rho * (f_Dk_current[k] - p_k[k]);
     }
 
     double min_f, max_f;
     cv::minMaxLoc(f, &min_f, &max_f);
-    std::cout << "DEBUG_KERNEL: f min: " << min_f << ", max: " << max_f << ", sum: " << cv::sum(f)[0] << std::endl;
+    std::cout << "[Kernel Stats] f min: " << min_f << ", max: " << max_f
+              << ", sum: " << cv::sum(f)[0] << "\n";
 
-    updateRho(L_x, L_y, f_Dk_rho);
-
-    std::cout << "ADMM Rho: " << rho << ", Lambda1 Tau: " << lambda1 / rho << std::endl;
-    std::cout << "Debug: updateAuxAndLagrange() complete.\n";
+    updateRho(L_x, L_y, f_Dk_current);
+    std::cout << "[ADMM] Rho: " << rho << ", Lambda1/rho: " << tau1 << "\n";
+    std::cout << "[ADMM] updateAuxAndLagrange() complete.\n";
 }

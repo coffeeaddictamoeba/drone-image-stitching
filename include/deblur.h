@@ -86,7 +86,7 @@ private:
     void initializeSpatialDerivativeKernels();
 
     // L-step helpers
-    void padImageForDFT(const cv::Mat& input, cv::Mat& padded_output, cv::Size& dft_size);
+    cv::Mat padToSize(const cv::Mat& input, const cv::Size& target_size);
     void performLStepIFFTAndPostProcess(const cv::Mat& F_L_updated);
     cv::Mat computeLDenominator(const cv::Mat& F_f);
     cv::Mat computeLNumerator(const LStepFFTInputsContainer& inputs);

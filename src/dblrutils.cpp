@@ -4,6 +4,7 @@
 #include <limits>
 
 
+// --- Calculation helpers --- 
 cv::Size getOptimalDFTSize(const cv::Size& size) {
     int r = cv::getOptimalDFTSize(size.height);
     int c = cv::getOptimalDFTSize(size.width);
@@ -23,6 +24,73 @@ void ifft2d(const cv::Mat& input_complex, cv::Mat& output_complex) {
     cv::dft(input_complex, output_complex, cv::DFT_INVERSE | cv::DFT_SCALE | cv::DFT_COMPLEX_OUTPUT);
 }
 
+cv::Mat fft2dWithPad(const cv::Mat& src, cv::Size size, const cv::Rect& roi) {
+    cv::Mat padded = cv::Mat::zeros(size, CV_32F);
+    src.copyTo(padded(roi));
+    cv::Mat complex;
+    fft2d(padded, complex);
+    return complex;
+}
+
+cv::Mat conj64F(const cv::Mat& complex32) {
+    cv::Mat complex64;
+    complex32.convertTo(complex64, CV_64FC2);
+    std::vector<cv::Mat> planes(2);
+    cv::split(complex64, planes);
+    planes[1] *= -1.0;
+    cv::merge(planes, complex64);
+    return complex64;
+}
+
+cv::Mat magSq64F(const cv::Mat& complex32) {
+    cv::Mat c64;
+    complex32.convertTo(c64, CV_64FC2);
+    std::vector<cv::Mat> planes(2);
+    cv::split(c64, planes);
+    return planes[0].mul(planes[0]) + planes[1].mul(planes[1]);
+}
+
+cv::Mat mergeRealImag(const cv::Mat& real, const cv::Mat& imag) {
+    std::vector<cv::Mat> planes = {real, imag};
+    cv::Mat merged;
+    cv::merge(planes, merged);
+    return merged;
+}
+
+cv::Mat divideComplex(const cv::Mat& numerator, const cv::Mat& denominator) {
+    cv::Mat result(numerator.size(), CV_64FC2);
+    for (int r = 0; r < numerator.rows; ++r) {
+        for (int c = 0; c < numerator.cols; ++c) {
+            cv::Vec2d numv = numerator.at<cv::Vec2d>(r, c);
+            cv::Vec2d denv = denominator.at<cv::Vec2d>(r, c);
+    
+            std::complex<double> num_comp(numv[0], numv[1]);
+            std::complex<double> den_comp(denv[0], denv[1]); // denv[1] should be 0.0
+    
+            std::complex<double> result_comp = num_comp / den_comp;
+    
+            result.at<cv::Vec2d>(r, c) = cv::Vec2d(result_comp.real(), result_comp.imag());
+        }
+    }
+    return result;
+}
+
+cv::Mat gaussianWindow(int size) {
+    cv::Mat window(size, size, CV_32F);
+    float sigma = size / 4.0f;
+    int center = size / 2;
+
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            float dx = x - center;
+            float dy = y - center;
+            window.at<float>(y, x) = std::exp(-(dx*dx + dy*dy) / (2 * sigma * sigma));
+        }
+    }
+    return window;
+}
+
+// --- Debug helpers ---
 void writeMatrix(const cv::Mat& m, const std::string& filename, const std::string& matrixName) {
     try {
         cv::FileStorage fs(filename, cv::FileStorage::WRITE);
@@ -93,33 +161,6 @@ void checkInfNan(const cv::Mat& m, const std::string& matrixName) {
     std::cout << "[" << matrixName << "] NaN count: " << nan_count << ", Inf count: " << inf_count << '\n';
 }
 
-void debugMatrix(const cv::Mat& m, const std::string& matrixName) {
-    const std::string filename = matrixName + ".yml";
-    writeMatrix(m, filename, matrixName);
-    checkInfNan(m, matrixName);
-    checkExactZero(m);
-    checkMagnitude(m);
-}
-
-void checkMagnitude(const cv::Mat& m) {
-    double minMagnitude = std::numeric_limits<double>::max();
-    double maxMagnitude = 0.0;
-    for (int r = 0; r < m.rows; ++r) {
-        for (int c = 0; c < m.cols; ++c) {
-            cv::Vec2d val = m.at<cv::Vec2d>(r, c);
-            double magnitude = std::abs(val[0]); // Imaginary part is 0, so just real part's abs value
-            if (magnitude < minMagnitude) {
-                minMagnitude = magnitude;
-            }
-            if (magnitude > maxMagnitude) {
-                maxMagnitude = magnitude;
-            }
-        }
-    }
-    std::cout << "Debug: Min magnitude (complex): " << minMagnitude << "\n";
-    std::cout << "Debug: Max magnitude (complex): " << maxMagnitude << "\n";
-}
-
 void checkExactZero(const cv::Mat& m) {
     int exactZeroCount = 0;
     for (int r = 0; r < m.rows; ++r) {
@@ -131,24 +172,6 @@ void checkExactZero(const cv::Mat& m) {
         }
     }
     std::cout << "Debug: Exact zero complex elements: " << exactZeroCount << "\n";
-}
-
-cv::Mat divideComplex(const cv::Mat& numerator, const cv::Mat& denominator) {
-    cv::Mat result(numerator.size(), CV_64FC2);
-    for (int r = 0; r < numerator.rows; ++r) {
-        for (int c = 0; c < numerator.cols; ++c) {
-            cv::Vec2d numv = numerator.at<cv::Vec2d>(r, c);
-            cv::Vec2d denv = denominator.at<cv::Vec2d>(r, c);
-    
-            std::complex<double> num_comp(numv[0], numv[1]);
-            std::complex<double> den_comp(denv[0], denv[1]); // denv[1] should be 0.0
-    
-            std::complex<double> result_comp = num_comp / den_comp;
-    
-            result.at<cv::Vec2d>(r, c) = cv::Vec2d(result_comp.real(), result_comp.imag());
-        }
-    }
-    return result;
 }
 
 void printMatStats(const cv::Mat& mat, const std::string& name) {
@@ -179,19 +202,12 @@ void printMatStats(const cv::Mat& mat, const std::string& name) {
     }
 }
 
-cv::Mat gaussianWindow(int size) {
-    cv::Mat window(size, size, CV_32F);
-    float sigma = size / 4.0f;
-    int center = size / 2;
-
-    for (int y = 0; y < size; ++y) {
-        for (int x = 0; x < size; ++x) {
-            float dx = x - center;
-            float dy = y - center;
-            window.at<float>(y, x) = std::exp(-(dx*dx + dy*dy) / (2 * sigma * sigma));
-        }
-    }
-    return window;
+void debugMatrix(const cv::Mat& m, const std::string& matrixName) {
+    const std::string filename = matrixName + ".yml";
+    writeMatrix(m, filename, matrixName);
+    checkInfNan(m, matrixName);
+    checkExactZero(m);
+    printMatStats(m, matrixName);
 }
 
 // Generate normalized Gaussian kernel
