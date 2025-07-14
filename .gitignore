@@ -33,5 +33,8 @@
 
 incoming/
 stitched/
-mosaic
+mosaic_odm
 /batches/
+tiles/
+results/
+bin/

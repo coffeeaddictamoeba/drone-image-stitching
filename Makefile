@@ -3,7 +3,7 @@ CXXFLAGS := -std=c++17 -Wall -Wextra -O2
 PKGCONFIG := pkg-config
 LIBS := $(shell $(PKGCONFIG) --cflags --libs opencv4 gdal)
 
-TARGET := mosaic
+TARGET := mosaic_odm
 SRC := main.cpp
 
 all: $(TARGET)
