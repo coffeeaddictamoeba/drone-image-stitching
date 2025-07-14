@@ -190,7 +190,6 @@ void merge_with_vrt(const fs::path& ortho_path) {
     fs::path unique_path = fs::path("stitched") / ("ortho_" + timestamp.str() + ".tif");
 
     std::cout << "[DEBUG] Copying orthophoto to: " << unique_path << std::endl;
-
     try {
         fs::copy_file(ortho_path, unique_path, fs::copy_options::overwrite_existing);
     } catch (const fs::filesystem_error& e) {
@@ -198,28 +197,59 @@ void merge_with_vrt(const fs::path& ortho_path) {
         return;
     }
 
-    std::cout << "[DEBUG] Stitching all orthophotos using gdalwarp..." << std::endl;
+    if (fs::exists(STITCHED_FILE)) {
+        try {
+            fs::remove(STITCHED_FILE);
+        } catch (const fs::filesystem_error& e) {
+            std::cerr << "[ERROR] Could not remove old stitched file: " << e.what() << std::endl;
+            return;
+        }
+    }    
 
-    std::stringstream ss;
-    ss << "gdalwarp -overwrite -multi "
-       << "-r cubic "
-       << "-of GTiff "
-       << "-co TILED=YES ";
-
-    if (config.compress) ss << "-co COMPRESS=DEFLATE ";
-    if (config.useBigTIFF) ss << "-co BIGTIFF=YES ";
-
-    ss << "-co BLOCKXSIZE=" << config.blockSize << " "
-       << "-co BLOCKYSIZE=" << config.blockSize << " "
-       << "stitched/*.tif "
-       << STITCHED_FILE;
-
-    int result = run_command(ss.str());
-    if (result != 0) {
-        std::cerr << "[ERROR] gdalwarp failed to generate stitched orthophoto." << std::endl;
-    } else {
-        std::cout << "[INFO] Successfully updated stitched orthophoto at: " << STITCHED_FILE << std::endl;
+    std::ofstream fileList("stitched/file_list.txt");
+    for (const auto& entry : fs::directory_iterator("stitched")) {
+        if (entry.path().extension() == ".tif") {
+            fileList << entry.path().string() << std::endl;
+        }
     }
+    fileList.close();
+
+    std::cout << "[DEBUG] Creating VRT from stitched orthophotos..." << std::endl;
+    std::stringstream buildvrt;
+    buildvrt << "gdalbuildvrt -overwrite "
+             << "-input_file_list stitched/file_list.txt "
+             << "-allow_projection_difference "
+             << "-resolution highest "
+             << "-hidenodata "
+             << "\"" << VRT << "\"";
+
+    if (run_command(buildvrt.str()) != 0) {
+        std::cerr << "[ERROR] Failed to build VRT from orthophotos." << std::endl;
+        return;
+    }
+
+    std::stringstream warp;
+    warp << "gdalwarp -overwrite -multi "
+         << "-r lanczos "
+         << "-wo NUM_THREADS=ALL_CPUS "
+         << "-wo CUTLINE_BLEND_DIST=10 "
+         << "-dstalpha "
+         << "-of GTiff "
+         << "-co TILED=YES ";
+
+    if (config.compress) warp << "-co COMPRESS=DEFLATE ";
+    if (config.useBigTIFF) warp << "-co BIGTIFF=YES ";
+
+    warp << "-co BLOCKXSIZE=" << config.blockSize << " "
+         << "-co BLOCKYSIZE=" << config.blockSize << " "
+         << "\"" << VRT << "\" \"" << STITCHED_FILE << "\"";
+
+    if (run_command(warp.str()) != 0) {
+        std::cerr << "[ERROR] gdalwarp failed to generate stitched orthophoto." << std::endl;
+        return;
+    }
+
+    std::cout << "[INFO] Successfully updated stitched orthophoto at: " << STITCHED_FILE << std::endl;
 }
 
 void process_batches() {
