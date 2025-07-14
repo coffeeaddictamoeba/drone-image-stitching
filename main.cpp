@@ -1,6 +1,7 @@
 #include <csignal>
 #include <cstddef>
 #include <iostream>
+#include <algorithm> 
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -98,11 +99,81 @@ bool validate_geotiff(const fs::path& path) {
 
     int width = dataset->GetRasterXSize();
     int height = dataset->GetRasterYSize();
-    GDALClose(dataset);
-
     if (width == 0 || height == 0) {
         std::cerr << "[ERROR] Invalid image dimensions: " << path << std::endl;
+        GDALClose(dataset);
         return false;
+    }
+
+    int bandCount = dataset->GetRasterCount();
+    if (bandCount < 3) {
+        std::cerr << "[ERROR] Not enough bands (RGB expected): " << path << std::endl;
+        GDALClose(dataset);
+        return false;
+    }
+
+    int sampleSize = 500;
+    int xOff = std::max(0, width / 2 - sampleSize / 2);
+    int yOff = std::max(0, height / 2 - sampleSize / 2);
+    int winX = std::min(sampleSize, width - xOff);
+    int winY = std::min(sampleSize, height - yOff);
+
+    std::vector<float> buffer(winX * winY);
+    double totalStdDev = 0.0;
+    for (int i = 1; i <= 3; ++i) {
+        GDALRasterBand* band = dataset->GetRasterBand(i);
+        if (band->RasterIO(GF_Read, xOff, yOff, winX, winY,
+                           buffer.data(), winX, winY, GDT_Float32,
+                           0, 0) != CE_None) {
+            std::cerr << "[ERROR] Failed to read band " << i << " of image: " << path << std::endl;
+            GDALClose(dataset);
+            return false;
+        }
+
+        double sum = 0.0, sqSum = 0.0;
+        for (float val : buffer) {
+            sum += val;
+            sqSum += val * val;
+        }
+        double n = buffer.size();
+        double mean = sum / n;
+        double stddev = std::sqrt((sqSum / n) - (mean * mean));
+        totalStdDev += stddev;
+    }
+
+    bool rgbValid = totalStdDev >= 25.0;
+
+    bool alphaValid = true;
+    if (bandCount >= 4) {
+        GDALRasterBand* alphaBand = dataset->GetRasterBand(4);
+        if (alphaBand->RasterIO(GF_Read, xOff, yOff, winX, winY,
+                                buffer.data(), winX, winY, GDT_Float32,
+                                0, 0) != CE_None) {
+            std::cerr << "[WARN] Could not read alpha band — skipping transparency check." << std::endl;
+        } else {
+            int visiblePixels = std::count_if(buffer.begin(), buffer.end(), [](float v) {
+                return v > 10.0f;
+            });
+            double visibleFraction = (double)visiblePixels / buffer.size();
+            if (visibleFraction < 0.1) {
+                alphaValid = false;
+            }
+        }
+    }
+
+    GDALClose(dataset);
+
+    if (!rgbValid && !alphaValid) {
+        std::cerr << "[ERROR] Rejected: low RGB variance and mostly transparent: " << path << std::endl;
+        return false;
+    }
+
+    if (!rgbValid) {
+        std::cerr << "[WARN] Low RGB variance (stddev=" << totalStdDev << "): " << path << std::endl;
+    }
+
+    if (!alphaValid) {
+        std::cerr << "[WARN] Alpha band mostly transparent in central region: " << path << std::endl;
     }
 
     return true;
@@ -197,7 +268,11 @@ void process_batches() {
 
             if (!validate_geotiff(ortho)) {
                 std::cerr << "[ERROR] Orthophoto failed GDAL validation. Deleting and retrying..." << std::endl;
-                fs::remove(ortho);
+                for (const auto& entry : fs::directory_iterator(batch_path)) {
+                    if (entry.path().filename() == "images")
+                        continue;
+                    fs::remove_all(entry.path());
+                }
                 ++retryCount;
                 std::this_thread::sleep_for(std::chrono::seconds(config.retryTimeoutSec));
                 continue;
