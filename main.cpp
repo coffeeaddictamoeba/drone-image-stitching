@@ -24,7 +24,9 @@ struct Config {
     std::string incomingDir = "incoming";
     std::size_t blockSize = 256;
     std::size_t batchSize = 5;
+    std::size_t retries = 3;
     int batchTimeoutSec = 5;
+    int retryTimeoutSec = 5;
     bool useBigTIFF = true;
     bool compress = true;
 };
@@ -87,6 +89,25 @@ bool run_odm_batch(const fs::path& batch_path) {
     return run_command(cmd) == 0;
 }
 
+bool validate_geotiff(const fs::path& path) {
+    GDALDataset* dataset = (GDALDataset*) GDALOpen(path.string().c_str(), GA_ReadOnly);
+    if (!dataset) {
+        std::cerr << "[ERROR] GDAL failed to open image: " << path << std::endl;
+        return false;
+    }
+
+    int width = dataset->GetRasterXSize();
+    int height = dataset->GetRasterYSize();
+    GDALClose(dataset);
+
+    if (width == 0 || height == 0) {
+        std::cerr << "[ERROR] Invalid image dimensions: " << path << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
 void merge_with_vrt(const fs::path& ortho_path) {
     std::lock_guard<std::mutex> lock(mosaicMutex);
 
@@ -143,13 +164,54 @@ void process_batches() {
         lock.unlock();
 
         fs::path batch_path = create_batch(images, batch_id++);
-        if (run_odm_batch(batch_path)) {
-            fs::path ortho = batch_path / "odm_orthophoto" / "odm_orthophoto.tif";
-            if (fs::exists(ortho)) {
-                merge_with_vrt(ortho);
+        fs::path ortho = batch_path / "odm_orthophoto" / "odm_orthophoto.tif";
+
+        std::size_t retryCount = 0;
+        bool success = false;
+
+        while (retryCount < config.retries) {
+            std::cout << "[INFO] Processing batch (retry #" << retryCount << "): " << batch_path << std::endl;
+
+            if (!run_odm_batch(batch_path)) {
+                std::cerr << "[ERROR] ODM command failed. Retrying..." << std::endl;
+                ++retryCount;
+                std::this_thread::sleep_for(std::chrono::seconds(config.retryTimeoutSec));
+                continue;
             }
+
+            if (!fs::exists(ortho)) {
+                std::cerr << "[ERROR] Orthophoto not found after ODM run." << std::endl;
+                ++retryCount;
+                std::this_thread::sleep_for(std::chrono::seconds(config.retryTimeoutSec));
+                continue;
+            }
+
+            auto file_size = fs::file_size(ortho);
+            if (file_size == 0) {
+                std::cerr << "[ERROR] Orthophoto is 0 bytes. Deleting and retrying..." << std::endl;
+                fs::remove(ortho);
+                ++retryCount;
+                std::this_thread::sleep_for(std::chrono::seconds(config.retryTimeoutSec));
+                continue;
+            }
+
+            if (!validate_geotiff(ortho)) {
+                std::cerr << "[ERROR] Orthophoto failed GDAL validation. Deleting and retrying..." << std::endl;
+                fs::remove(ortho);
+                ++retryCount;
+                std::this_thread::sleep_for(std::chrono::seconds(config.retryTimeoutSec));
+                continue;
+            }
+
+            std::cout << "[INFO] Orthophoto passed validation: " << ortho << std::endl;
+            success = true;
+            break;
+        }
+
+        if (success) {
+            merge_with_vrt(ortho);
         } else {
-            std::cerr << "[ERROR] ODM batch failed: " << batch_path << std::endl;
+            std::cerr << "[FATAL] Batch failed after " << config.retries << " retries: " << batch_path << std::endl;
         }
     }
 }
@@ -218,6 +280,10 @@ void parse_args(int argc, char* argv[], Config& config) {
             config.compress = false;
         else if (arg == "--blocksize" && i + 1 < argc)
             config.blockSize = std::stoi(argv[++i]);
+        else if (arg == "--retry-amount" && i + 1 < argc)
+            config.retries = std::stoi(argv[++i]);
+        else if (arg == "--retry-delay" && i + 1 < argc)
+            config.retryTimeoutSec = std::stoi(argv[++i]);
         else {
             std::cerr << "Unknown or incomplete argument: " << arg << std::endl;
             std::exit(1);
@@ -231,6 +297,7 @@ void signal_handler(int) {
 }
 
 int main(int argc, char* argv[]) {
+    GDALAllRegister();
     parse_args(argc, argv, config);
 
     init_dirs();
