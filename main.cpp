@@ -1,11 +1,12 @@
 #include <csignal>
+#include <cstddef>
 #include <iostream>
 #include <filesystem>
 #include <fstream>
 #include <thread>
 #include <mutex>
 #include <chrono>
-#include <set>
+#include <unordered_set>
 #include <vector>
 #include <queue>
 #include <condition_variable>
@@ -13,31 +14,43 @@
 #include <sstream>
 #include <iomanip>
 #include <atomic>
-#include <map>
+#include <unistd.h>
 #include <gdal/gdal_priv.h>
 #include <gdal/ogr_spatialref.h>
 
 namespace fs = std::filesystem;
 
-constexpr const char* INCOMING = "incoming";
-constexpr const char* BATCHES = "batches";
-constexpr const char* STITCHED = "stitched/final_orthophoto.tif";
-constexpr const char* VRT = "stitched/final.vrt";
-constexpr int BATCH_SIZE = 5;
-constexpr std::chrono::seconds BATCH_TIMEOUT(5);
+struct Config {
+    std::string incomingDir = "incoming";
+    std::size_t blockSize = 256;
+    std::size_t batchSize = 5;
+    int batchTimeoutSec = 5;
+    bool useBigTIFF = true;
+    bool compress = true;
+};
 
+Config config;
 std::mutex mosaicMutex;
 std::atomic<bool> stopSignal = false;
 std::mutex queueMutex;
 std::condition_variable queueCV;
-
 std::vector<fs::path> imageBuffer;
 auto lastBatchTime = std::chrono::steady_clock::now();
-
 std::queue<std::vector<fs::path>> batchQueue;
 
+constexpr const char* STITCHED_FILE = "stitched/final_orthophoto.tif";
+constexpr const char* VRT = "stitched/final.vrt";
+constexpr const char* BATCHES = "batches";
+
+
+inline bool is_jpg(const fs::path& p) {
+    auto ext = p.extension().string();
+    for (auto& c : ext) c = std::tolower(c);
+    return ext == ".jpg";
+}
+
 void init_dirs() {
-    fs::create_directories(INCOMING);
+    fs::create_directories(config.incomingDir);
     fs::create_directories(BATCHES);
     fs::create_directories("stitched");
 }
@@ -59,36 +72,47 @@ int run_command(const std::string& cmd) {
 }
 
 bool run_odm_batch(const fs::path& batch_path) {
+    // This is needed to create files from the user, not the root
+    std::string uid = std::to_string(getuid());
+    std::string gid = std::to_string(getgid());
+
     std::string abs_path = fs::absolute(batch_path).string();
-    std::string cmd = "docker run --rm -v \"" + abs_path + ":/datasets/project\" "
+    std::string cmd = "docker run --rm "
+                  "--user " + uid + ":" + gid + " "
+                  "-v \"" + abs_path + ":/datasets/project\" "
+                  "-w /datasets/project "
                   "opendronemap/odm "
-                  "--project-path /datasets project --fast-orthophoto --skip-3dmodel";
+                  "--project-path /datasets project "
+                  "--fast-orthophoto --skip-3dmodel";
     return run_command(cmd) == 0;
 }
 
 void merge_with_vrt(const fs::path& ortho_path) {
     std::lock_guard<std::mutex> lock(mosaicMutex);
 
-    if (!fs::exists(VRT)) {
-        run_command("gdalbuildvrt " + std::string(VRT) + " " + ortho_path.string());
-    } else {
-        run_command("gdalbuildvrt -update " + std::string(VRT) + " " + ortho_path.string());
-    }
+    auto now = std::chrono::system_clock::now();
+    auto now_c = std::chrono::system_clock::to_time_t(now);
+    std::stringstream timestamp;
+    timestamp << std::put_time(std::localtime(&now_c), "%Y%m%d_%H%M%S");
 
-    std::string translateCmd =
-        "gdal_translate -of GTiff "
-        "-co TILED=YES "
-        "-co COMPRESS=DEFLATE "
-        //"-co BIGTIFF=YES "
-        "-co BLOCKXSIZE=256 -co BLOCKYSIZE=256 "
-        + std::string(VRT) + " " + std::string(STITCHED);
+    fs::path unique_path = fs::path("stitched") / ("ortho_" + timestamp.str() + ".tif");
 
-    int result = run_command(translateCmd);
-    if (result == 0) {
-        std::cout << "[STITCH] Final orthophoto updated with tiling and compression.\n";
-    } else {
-        std::cerr << "[STITCH] Failed to create optimized GeoTIFF.\n";
-    }
+    std::cout << "[DEBUG] Copying orthophoto to: " << unique_path << std::endl;
+
+    fs::copy_file(ortho_path, unique_path, fs::copy_options::overwrite_existing);
+
+    std::cout << "[DEBUG] Rebuilding VRT from stitched/*.tif" << std::endl;
+    run_command("gdalbuildvrt -overwrite stitched/final.vrt stitched/*.tif");
+
+    std::stringstream ss;
+    ss << "gdal_translate -of GTiff -co TILED=YES ";
+    if (config.compress)  ss << "-co COMPRESS=DEFLATE ";
+    if (config.useBigTIFF) ss << "-co BIGTIFF=YES ";
+    ss << "-co BLOCKXSIZE=" << config.blockSize << " "
+       << "-co BLOCKYSIZE=" << config.blockSize << " "
+       << VRT << " stitched/final_orthophoto.tif";
+
+    run_command(ss.str());
 }
 
 void process_batches() {
@@ -116,13 +140,13 @@ void process_batches() {
 }
 
 void watch_folder() {
-    std::set<fs::path> seen;
+    std::unordered_set<fs::path> seen;
 
     while (!stopSignal) {
         std::vector<fs::path> new_images;
-        for (const auto& f : fs::directory_iterator(INCOMING)) {
-            if ((f.path().extension() == ".jpg" || f.path().extension() == ".JPG") &&
-                seen.find(f.path()) == seen.end()) {
+
+        for (const auto& f : fs::directory_iterator(config.incomingDir)) {
+            if (is_jpg(f.path()) && seen.find(f.path()) == seen.end()) {
                 new_images.push_back(f.path());
                 seen.insert(f.path());
             }
@@ -134,15 +158,16 @@ void watch_folder() {
 
             auto now = std::chrono::steady_clock::now();
 
-            while (imageBuffer.size() >= BATCH_SIZE) {
-                std::vector<fs::path> batch(imageBuffer.begin(), imageBuffer.begin() + BATCH_SIZE);
+            while (imageBuffer.size() >= config.batchSize) {
+                std::vector<fs::path> batch(imageBuffer.begin(), imageBuffer.begin() + config.batchSize);
                 batchQueue.push(batch);
-                imageBuffer.erase(imageBuffer.begin(), imageBuffer.begin() + BATCH_SIZE);
+                imageBuffer.erase(imageBuffer.begin(), imageBuffer.begin() + config.batchSize);
                 queueCV.notify_one();
                 lastBatchTime = now;
             }
 
-            if (!imageBuffer.empty() && now - lastBatchTime > BATCH_TIMEOUT) {
+            if (!imageBuffer.empty() &&
+                now - lastBatchTime > std::chrono::seconds(config.batchTimeoutSec)) {
                 batchQueue.push(imageBuffer);
                 imageBuffer.clear();
                 queueCV.notify_one();
@@ -163,12 +188,36 @@ void watch_folder() {
     }
 }
 
+void parse_args(int argc, char* argv[], Config& config) {
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--batch-size" && i + 1 < argc)
+            config.batchSize = std::stoi(argv[++i]);
+        else if (arg == "--timeout" && i + 1 < argc)
+            config.batchTimeoutSec = std::stoi(argv[++i]);
+        else if (arg == "--incoming" && i + 1 < argc)
+            config.incomingDir = argv[++i];
+        else if (arg == "--no-bigtiff")
+            config.useBigTIFF = false;
+        else if (arg == "--no-compress")
+            config.compress = false;
+        else if (arg == "--blocksize" && i + 1 < argc)
+            config.blockSize = std::stoi(argv[++i]);
+        else {
+            std::cerr << "Unknown or incomplete argument: " << arg << std::endl;
+            std::exit(1);
+        }
+    }
+}
+
 void signal_handler(int) {
     stopSignal = true;
     queueCV.notify_all();
 }
 
-int main() {
+int main(int argc, char* argv[]) {
+    parse_args(argc, argv, config);
+
     init_dirs();
     std::signal(SIGINT, signal_handler);
 
