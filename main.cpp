@@ -99,20 +99,35 @@ void merge_with_vrt(const fs::path& ortho_path) {
 
     std::cout << "[DEBUG] Copying orthophoto to: " << unique_path << std::endl;
 
-    fs::copy_file(ortho_path, unique_path, fs::copy_options::overwrite_existing);
+    try {
+        fs::copy_file(ortho_path, unique_path, fs::copy_options::overwrite_existing);
+    } catch (const fs::filesystem_error& e) {
+        std::cerr << "[ERROR] Failed to copy orthophoto: " << e.what() << std::endl;
+        return;
+    }
 
-    std::cout << "[DEBUG] Rebuilding VRT from stitched/*.tif" << std::endl;
-    run_command("gdalbuildvrt -overwrite stitched/final.vrt stitched/*.tif");
+    std::cout << "[DEBUG] Stitching all orthophotos using gdalwarp..." << std::endl;
 
     std::stringstream ss;
-    ss << "gdal_translate -of GTiff -co TILED=YES ";
-    if (config.compress)  ss << "-co COMPRESS=DEFLATE ";
+    ss << "gdalwarp -overwrite -multi "
+       << "-r cubic "
+       << "-of GTiff "
+       << "-co TILED=YES ";
+
+    if (config.compress) ss << "-co COMPRESS=DEFLATE ";
     if (config.useBigTIFF) ss << "-co BIGTIFF=YES ";
+
     ss << "-co BLOCKXSIZE=" << config.blockSize << " "
        << "-co BLOCKYSIZE=" << config.blockSize << " "
-       << VRT << " stitched/final_orthophoto.tif";
+       << "stitched/*.tif "
+       << STITCHED_FILE;
 
-    run_command(ss.str());
+    int result = run_command(ss.str());
+    if (result != 0) {
+        std::cerr << "[ERROR] gdalwarp failed to generate stitched orthophoto." << std::endl;
+    } else {
+        std::cout << "[INFO] Successfully updated stitched orthophoto at: " << STITCHED_FILE << std::endl;
+    }
 }
 
 void process_batches() {
