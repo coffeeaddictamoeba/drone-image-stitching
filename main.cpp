@@ -179,7 +179,7 @@ bool validate_geotiff(const fs::path& path) {
     return true;
 }
 
-void merge_with_vrt(const fs::path& ortho_path) {
+void merge_with_otb(const fs::path& ortho_path) {
     std::lock_guard<std::mutex> lock(mosaicMutex);
 
     auto now = std::chrono::system_clock::now();
@@ -197,16 +197,7 @@ void merge_with_vrt(const fs::path& ortho_path) {
         return;
     }
 
-    if (fs::exists(STITCHED_FILE)) {
-        try {
-            fs::remove(STITCHED_FILE);
-        } catch (const fs::filesystem_error& e) {
-            std::cerr << "[ERROR] Could not remove old stitched file: " << e.what() << std::endl;
-            return;
-        }
-    }    
-
-    std::ofstream fileList("stitched/file_list.txt");
+    std::ofstream fileList("stitched/file_list_otb.txt");
     for (const auto& entry : fs::directory_iterator("stitched")) {
         if (entry.path().extension() == ".tif") {
             fileList << entry.path().string() << std::endl;
@@ -214,42 +205,27 @@ void merge_with_vrt(const fs::path& ortho_path) {
     }
     fileList.close();
 
-    std::cout << "[DEBUG] Creating VRT from stitched orthophotos..." << std::endl;
-    std::stringstream buildvrt;
-    buildvrt << "gdalbuildvrt -overwrite "
-             << "-input_file_list stitched/file_list.txt "
-             << "-allow_projection_difference "
-             << "-resolution highest "
-             << "-hidenodata "
-             << "\"" << VRT << "\"";
+    // otbcli_Mosaic 9.1.0
+    std::stringstream otbMosaic;
+    otbMosaic << "otbcli_Mosaic -il ";
+    for (const auto& entry : fs::directory_iterator("stitched")) {
+        if (entry.path().extension() == ".tif") {
+            otbMosaic << "\"" << entry.path().string() << "\" ";
+        }
+    }
+    otbMosaic << "-comp.feather slim "
+          << "-comp.feather.slim.length 10 "
+          << "-comp.feather.slim.exponent 1.0 "
+          << "-interpolator bco "
+          << "-interpolator.bco.radius 2 "
+          << "-out \"" << STITCHED_FILE << "\" uint8";
 
-    if (run_command(buildvrt.str()) != 0) {
-        std::cerr << "[ERROR] Failed to build VRT from orthophotos." << std::endl;
+    if (run_command(otbMosaic.str()) != 0) {
+        std::cerr << "[ERROR] OTB Mosaic command failed." << std::endl;
         return;
     }
 
-    std::stringstream warp;
-    warp << "gdalwarp -overwrite -multi "
-         << "-r lanczos "
-         << "-wo NUM_THREADS=ALL_CPUS "
-         << "-wo CUTLINE_BLEND_DIST=10 "
-         << "-dstalpha "
-         << "-of GTiff "
-         << "-co TILED=YES ";
-
-    if (config.compress) warp << "-co COMPRESS=DEFLATE ";
-    if (config.useBigTIFF) warp << "-co BIGTIFF=YES ";
-
-    warp << "-co BLOCKXSIZE=" << config.blockSize << " "
-         << "-co BLOCKYSIZE=" << config.blockSize << " "
-         << "\"" << VRT << "\" \"" << STITCHED_FILE << "\"";
-
-    if (run_command(warp.str()) != 0) {
-        std::cerr << "[ERROR] gdalwarp failed to generate stitched orthophoto." << std::endl;
-        return;
-    }
-
-    std::cout << "[INFO] Successfully updated stitched orthophoto at: " << STITCHED_FILE << std::endl;
+    std::cout << "[INFO] Successfully updated stitched orthophoto using OTB: " << STITCHED_FILE << std::endl;
 }
 
 void process_batches() {
@@ -275,6 +251,11 @@ void process_batches() {
 
             if (!run_odm_batch(batch_path)) {
                 std::cerr << "[ERROR] ODM command failed. Retrying..." << std::endl;
+                for (const auto& entry : fs::directory_iterator(batch_path)) {
+                    if (entry.path().filename() == "images")
+                        continue;
+                    fs::remove_all(entry.path());
+                }
                 ++retryCount;
                 std::this_thread::sleep_for(std::chrono::seconds(config.retryTimeoutSec));
                 continue;
@@ -314,7 +295,7 @@ void process_batches() {
         }
 
         if (success) {
-            merge_with_vrt(ortho);
+            merge_with_otb(ortho);
         } else {
             std::cerr << "[FATAL] Batch failed after " << config.retries << " retries: " << batch_path << std::endl;
         }
