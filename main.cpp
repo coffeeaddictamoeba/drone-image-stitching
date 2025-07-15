@@ -4,6 +4,7 @@
 #include <algorithm> 
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <thread>
 #include <mutex>
@@ -54,6 +55,7 @@ constexpr const char* STITCHED_FILE = "stitched/final_orthophoto.tif";
 constexpr const char* VRT = "stitched/final.vrt";
 constexpr const char* BATCHES = "batches";
 
+std::optional<std::chrono::steady_clock::time_point> bufferStartTime = std::nullopt;
 
 inline bool is_jpg(const fs::path& p) {
     auto ext = p.extension().string();
@@ -342,6 +344,7 @@ void process_batches() {
 
 void watch_folder() {
     std::unordered_set<fs::path> seen;
+    std::optional<std::chrono::steady_clock::time_point> bufferStartTime = std::nullopt;
 
     while (!stopSignal) {
         std::vector<fs::path> new_images;
@@ -355,7 +358,14 @@ void watch_folder() {
 
         {
             std::lock_guard<std::mutex> lock(queueMutex);
-            imageBuffer.insert(imageBuffer.end(), new_images.begin(), new_images.end());
+
+            if (!new_images.empty()) {
+                imageBuffer.insert(imageBuffer.end(), new_images.begin(), new_images.end());
+
+                if (!bufferStartTime.has_value()) {
+                    bufferStartTime = std::chrono::steady_clock::now();
+                }
+            }
 
             auto now = std::chrono::steady_clock::now();
 
@@ -364,28 +374,26 @@ void watch_folder() {
                 batchQueue.push(batch);
                 imageBuffer.erase(imageBuffer.begin(), imageBuffer.begin() + config.batchSize);
                 queueCV.notify_one();
-                lastBatchTime = now;
+
+                if (imageBuffer.empty()) {
+                    bufferStartTime = std::nullopt;
+                } else {
+                    bufferStartTime = now;
+                }
             }
 
-            if (!imageBuffer.empty() &&
-                now - lastBatchTime > std::chrono::seconds(config.batchTimeoutSec)) {
+            if (bufferStartTime &&
+                (now - *bufferStartTime >= std::chrono::seconds(config.batchTimeoutSec)) &&
+                !imageBuffer.empty()) {
+
                 batchQueue.push(imageBuffer);
                 imageBuffer.clear();
+                bufferStartTime = std::nullopt;
                 queueCV.notify_one();
-                lastBatchTime = now;
             }
         }
 
         std::this_thread::sleep_for(std::chrono::seconds(2));
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(queueMutex);
-        if (!imageBuffer.empty()) {
-            batchQueue.push(imageBuffer);
-            imageBuffer.clear();
-            queueCV.notify_one();
-        }
     }
 }
 
