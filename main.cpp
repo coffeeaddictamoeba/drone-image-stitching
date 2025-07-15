@@ -4,6 +4,7 @@
 #include <algorithm> 
 #include <filesystem>
 #include <fstream>
+#include <string>
 #include <thread>
 #include <mutex>
 #include <chrono>
@@ -27,9 +28,17 @@ struct Config {
     std::size_t batchSize = 5;
     std::size_t retries = 3;
     int batchTimeoutSec = 5;
-    int retryTimeoutSec = 5;
+    int retryTimeoutSec = 3;
     bool useBigTIFF = true;
     bool compress = true;
+};
+
+enum class OdmRunResult {
+    Success,
+    CommandFailed,
+    OrthophotoNotFound,
+    OrthophotoZeroBytes,
+    ValidationFailed
 };
 
 Config config;
@@ -228,6 +237,86 @@ void merge_with_otb(const fs::path& ortho_path) {
     std::cout << "[INFO] Successfully updated stitched orthophoto using OTB: " << STITCHED_FILE << std::endl;
 }
 
+void clean_after_odm(const fs::path& batch_path, const std::string& message = "") {
+    std::cerr << message << std::endl;
+    std::cerr << "Cleaning batch path: " << batch_path << std::endl;
+    for (const auto& entry : fs::directory_iterator(batch_path)) {
+        if (entry.path().filename() == "images") {
+            continue;
+        }
+        try {
+            fs::remove_all(entry.path());
+        } catch (const fs::filesystem_error& e) {
+            std::cerr << "[WARNING] Failed to remove " << entry.path() << ": " << e.what() << std::endl;
+        }
+    }
+}
+
+bool run_odm_batch_successful(const fs::path& batch_path, const fs::path& ortho) {
+    std::size_t retryCount = 0;
+    while (retryCount < config.retries) {
+        std::cout << "[INFO] Processing batch (attempt #" << retryCount + 1 << " of " << config.retries << "): " << batch_path << std::endl;
+
+        OdmRunResult result = OdmRunResult::CommandFailed;
+
+        if (run_odm_batch(batch_path)) {
+            if (!fs::exists(ortho)) {
+                result = OdmRunResult::OrthophotoNotFound;
+                std::cerr << "[ERROR] Orthophoto not found after ODM run: " << ortho << std::endl;
+            } else {
+                try {
+                    auto file_size = fs::file_size(ortho);
+                    if (file_size == 0) {
+                        result = OdmRunResult::OrthophotoZeroBytes;
+                        std::cerr << "[ERROR] Orthophoto is 0 bytes: " << ortho << std::endl;
+                    } else {
+                        if (!validate_geotiff(ortho)) {
+                            result = OdmRunResult::ValidationFailed;
+                            std::cerr << "[ERROR] Orthophoto failed GDAL validation: " << ortho << std::endl;
+                        } else {
+                            result = OdmRunResult::Success;
+                        }
+                    }
+                } catch (const fs::filesystem_error& e) {
+                    result = OdmRunResult::OrthophotoNotFound;
+                    std::cerr << "[ERROR] Failed to get file size for " << ortho << ": " << e.what() << std::endl;
+                }
+            }
+        } else {
+            std::string err = "[ERROR] ODM command failed for batch: " + batch_path.string() + ". Retrying...";
+            clean_after_odm(batch_path, err);
+            ++retryCount;
+            std::this_thread::sleep_for(std::chrono::seconds(config.retryTimeoutSec));
+            continue;
+        }
+
+        if (result == OdmRunResult::Success) {
+            std::cout << "[INFO] Orthophoto passed validation: " << ortho << std::endl;
+            return true;
+        } else {
+            std::string err_message;
+            switch (result) {
+                case OdmRunResult::OrthophotoNotFound:
+                    err_message = "[ERROR] Orthophoto not found after ODM run.";
+                    break;
+                case OdmRunResult::OrthophotoZeroBytes:
+                    err_message = "[ERROR] Orthophoto is 0 bytes. Deleting and retrying...";
+                    break;
+                case OdmRunResult::ValidationFailed:
+                    err_message = "[ERROR] Orthophoto failed GDAL validation. Deleting and retrying...";
+                    break;
+                default:
+                    err_message = "[ERROR] Unhandled ODM processing error.";
+                    break;
+            }
+            clean_after_odm(batch_path, err_message);
+            ++retryCount;
+            std::this_thread::sleep_for(std::chrono::seconds(config.retryTimeoutSec));
+        }
+    }
+    return false;
+}
+
 void process_batches() {
     int batch_id = 1;
     while (!stopSignal) {
@@ -243,58 +332,7 @@ void process_batches() {
         fs::path batch_path = create_batch(images, batch_id++);
         fs::path ortho = batch_path / "odm_orthophoto" / "odm_orthophoto.tif";
 
-        std::size_t retryCount = 0;
-        bool success = false;
-
-        while (retryCount < config.retries) {
-            std::cout << "[INFO] Processing batch (retry #" << retryCount << "): " << batch_path << std::endl;
-
-            if (!run_odm_batch(batch_path)) {
-                std::cerr << "[ERROR] ODM command failed. Retrying..." << std::endl;
-                for (const auto& entry : fs::directory_iterator(batch_path)) {
-                    if (entry.path().filename() == "images")
-                        continue;
-                    fs::remove_all(entry.path());
-                }
-                ++retryCount;
-                std::this_thread::sleep_for(std::chrono::seconds(config.retryTimeoutSec));
-                continue;
-            }
-
-            if (!fs::exists(ortho)) {
-                std::cerr << "[ERROR] Orthophoto not found after ODM run." << std::endl;
-                ++retryCount;
-                std::this_thread::sleep_for(std::chrono::seconds(config.retryTimeoutSec));
-                continue;
-            }
-
-            auto file_size = fs::file_size(ortho);
-            if (file_size == 0) {
-                std::cerr << "[ERROR] Orthophoto is 0 bytes. Deleting and retrying..." << std::endl;
-                fs::remove(ortho);
-                ++retryCount;
-                std::this_thread::sleep_for(std::chrono::seconds(config.retryTimeoutSec));
-                continue;
-            }
-
-            if (!validate_geotiff(ortho)) {
-                std::cerr << "[ERROR] Orthophoto failed GDAL validation. Deleting and retrying..." << std::endl;
-                for (const auto& entry : fs::directory_iterator(batch_path)) {
-                    if (entry.path().filename() == "images")
-                        continue;
-                    fs::remove_all(entry.path());
-                }
-                ++retryCount;
-                std::this_thread::sleep_for(std::chrono::seconds(config.retryTimeoutSec));
-                continue;
-            }
-
-            std::cout << "[INFO] Orthophoto passed validation: " << ortho << std::endl;
-            success = true;
-            break;
-        }
-
-        if (success) {
+        if (run_odm_batch_successful(batch_path, ortho)) {
             merge_with_otb(ortho);
         } else {
             std::cerr << "[FATAL] Batch failed after " << config.retries << " retries: " << batch_path << std::endl;
