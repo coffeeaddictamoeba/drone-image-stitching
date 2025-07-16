@@ -26,12 +26,14 @@ namespace fs = std::filesystem;
 struct Config {
     std::string incomingDir = "incoming";
     std::size_t blockSize = 256;
-    std::size_t batchSize = 5;
+    std::size_t batchSize = 10; // optimal
     std::size_t retries = 3;
     int batchTimeoutSec = 5;
     int retryTimeoutSec = 3;
     bool useBigTIFF = true;
     bool compress = true;
+    bool retry = true;
+    bool savePreviousOrthophoto = false;
 };
 
 enum class OdmRunResult {
@@ -208,6 +210,16 @@ void merge_with_otb(const fs::path& ortho_path) {
         return;
     }
 
+    if (config.savePreviousOrthophoto && fs::exists(STITCHED_FILE)) {
+        fs::path backup_path = fs::path("stitched") / ("final_orthophoto_prev_" + timestamp.str() + ".tif");
+        try {
+            fs::copy_file(STITCHED_FILE, backup_path, fs::copy_options::overwrite_existing);
+            std::cout << "[INFO] Saved previous final orthophoto to: " << backup_path << std::endl;
+        } catch (const fs::filesystem_error& e) {
+            std::cerr << "[ERROR] Failed to backup previous orthophoto: " << e.what() << std::endl;
+        }
+    }
+
     std::ofstream fileList("stitched/file_list_otb.txt");
     for (const auto& entry : fs::directory_iterator("stitched")) {
         if (entry.path().extension() == ".tif") {
@@ -225,11 +237,11 @@ void merge_with_otb(const fs::path& ortho_path) {
         }
     }
     otbMosaic << "-comp.feather slim "
-          << "-comp.feather.slim.length 10 "
-          << "-comp.feather.slim.exponent 1.0 "
-          << "-interpolator bco "
-          << "-interpolator.bco.radius 2 "
-          << "-out \"" << STITCHED_FILE << "\" uint8";
+              << "-comp.feather.slim.length 10 "
+              << "-comp.feather.slim.exponent 1.0 "
+              << "-interpolator bco "
+              << "-interpolator.bco.radius 2 "
+              << "-out \"" << STITCHED_FILE << "\" uint8";
 
     if (run_command(otbMosaic.str()) != 0) {
         std::cerr << "[ERROR] OTB Mosaic command failed." << std::endl;
@@ -256,7 +268,10 @@ void clean_after_odm(const fs::path& batch_path, const std::string& message = ""
 
 bool run_odm_batch_successful(const fs::path& batch_path, const fs::path& ortho) {
     std::size_t retryCount = 0;
-    while (retryCount < config.retries) {
+
+    if (!config.retry) config.retries = 1;
+
+    while (retryCount < config.retries && !stopSignal) {
         std::cout << "[INFO] Processing batch (attempt #" << retryCount + 1 << " of " << config.retries << "): " << batch_path << std::endl;
 
         OdmRunResult result = OdmRunResult::CommandFailed;
@@ -288,6 +303,7 @@ bool run_odm_batch_successful(const fs::path& batch_path, const fs::path& ortho)
             std::string err = "[ERROR] ODM command failed for batch: " + batch_path.string() + ". Retrying...";
             clean_after_odm(batch_path, err);
             ++retryCount;
+            if (stopSignal) return false;
             std::this_thread::sleep_for(std::chrono::seconds(config.retryTimeoutSec));
             continue;
         }
@@ -313,6 +329,7 @@ bool run_odm_batch_successful(const fs::path& batch_path, const fs::path& ortho)
             }
             clean_after_odm(batch_path, err_message);
             ++retryCount;
+            if (stopSignal) return false;
             std::this_thread::sleep_for(std::chrono::seconds(config.retryTimeoutSec));
         }
     }
@@ -330,6 +347,8 @@ void process_batches() {
         auto images = batchQueue.front();
         batchQueue.pop();
         lock.unlock();
+
+        if (stopSignal) break;     
 
         fs::path batch_path = create_batch(images, batch_id++);
         fs::path ortho = batch_path / "odm_orthophoto" / "odm_orthophoto.tif";
@@ -410,6 +429,10 @@ void parse_args(int argc, char* argv[], Config& config) {
             config.useBigTIFF = false;
         else if (arg == "--no-compress")
             config.compress = false;
+        else if (arg == "--no-retry")
+            config.retry = false;
+        else if (arg == "--save-prev")
+            config.savePreviousOrthophoto = true;
         else if (arg == "--blocksize" && i + 1 < argc)
             config.blockSize = std::stoi(argv[++i]);
         else if (arg == "--retry-amount" && i + 1 < argc)
