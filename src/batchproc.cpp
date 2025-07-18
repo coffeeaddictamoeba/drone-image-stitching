@@ -1,0 +1,470 @@
+#include "../include/batchproc.h"
+#include <thread>
+#include <unistd.h>
+#include <algorithm>
+#include <cmath>
+#include <fstream>
+
+BatchProcessor::BatchProcessor(const Config& config_ref,
+                               std::queue<BatchTask>& batch_queue,
+                               std::mutex& queue_mutex,
+                               std::condition_variable& queue_cv,
+                               std::atomic<bool>& stop_signal)
+    : config_(config_ref),
+      batchQueue_(batch_queue),
+      queueMutex_(queue_mutex),
+      queueCV_(queue_cv),
+      stopSignal_(stop_signal) {
+    fs::create_directories(BATCHES_DIR);
+    fs::create_directories(fs::path(STITCHED_FILE).parent_path());
+}
+
+void BatchProcessor::processBatchesLoop() {
+    while (!stopSignal_) {
+        std::unique_lock<std::mutex> lock(queueMutex_);
+        queueCV_.wait(lock, [this] { return !batchQueue_.empty() || stopSignal_.load(); });
+
+        if (stopSignal_ && batchQueue_.empty()) break;
+
+        BatchTask task = batchQueue_.front();
+        batchQueue_.pop();
+        lock.unlock();
+
+        if (stopSignal_) break;
+
+        fs::path batch_path = createBatchDirectory(task.images, task.batch_id++);
+        fs::path ortho_path = batch_path / "odm_orthophoto" / "odm_orthophoto.tif";
+
+        if (runOdmBatchSuccessful(batch_path, ortho_path)) {
+            mergeWithOTB(ortho_path);
+        } else {
+            std::cerr << "[FATAL] Batch failed after " << config_.retries << " retries: " << batch_path << std::endl;
+        }
+
+        for (const auto& entry : fs::directory_iterator(batch_path)) {
+            if (entry.path().filename() == "images") {
+                std::cout << "[DEBUG] Skipping removal of: " << entry.path() << std::endl;
+                continue;
+            }
+            try {
+                fs::remove_all(entry.path());
+                std::cout << "[DEBUG] Removed: " << entry.path() << std::endl;
+            } catch (const fs::filesystem_error& e) {
+                std::cerr << "[WARNING] Failed to remove " << entry.path() << ": " << e.what() << std::endl;
+            }
+        }
+    }
+}
+
+fs::path BatchProcessor::createBatchDirectory(const std::vector<fs::path>& images, int batch_id) {
+    std::stringstream ss;
+    ss << "batch_" << std::setw(3) << std::setfill('0') << batch_id;
+    fs::path batch_root_path = fs::path(BATCHES_DIR) / ss.str();
+    fs::path images_path = batch_root_path / "images";
+    
+    fs::create_directories(images_path);
+    
+    for (const auto& img : images) {
+        try {
+            fs::rename(img, images_path / img.filename());
+        } catch (const fs::filesystem_error& e) {
+            std::cerr << "[ERROR] Failed to move image " << img << " to batch " << images_path << ": " << e.what() << std::endl;
+        }
+    }
+    return batch_root_path;
+}
+
+int BatchProcessor::runCommand(const std::string& cmd) {
+    std::cout << "[CMD] Running: " << cmd << std::endl;
+    return std::system(cmd.c_str());
+}
+
+bool BatchProcessor::runOdmBatchInternal(const fs::path& batch_path) {
+    std::string uid = std::to_string(getuid());
+    std::string gid = std::to_string(getgid());
+
+    std::string abs_path = fs::absolute(batch_path).string();
+    std::string cmd = "docker run --rm "
+                  "--user " + uid + ":" + gid + " "
+                  "-v \"" + abs_path + ":/datasets/project\" "
+                  "-w /datasets/project "
+                  "opendronemap/odm "
+                  "--project-path /datasets project "
+                  "--fast-orthophoto --skip-3dmodel";
+    return runCommand(cmd) == 0;
+}
+
+bool BatchProcessor::validateGeotiff(const fs::path& path) {
+    GDALDatasetRAII dataset((GDALDataset*)GDALOpen(path.string().c_str(), GA_ReadOnly));
+    if (!dataset) {
+        std::cerr << "[ERROR] GDAL failed to open image: " << path << std::endl;
+        return false;
+    }
+
+    int width = dataset->GetRasterXSize();
+    int height = dataset->GetRasterYSize();
+    if (width == 0 || height == 0) {
+        std::cerr << "[ERROR] Invalid image dimensions: " << path << std::endl;
+        return false;
+    }
+
+    int bandCount = dataset->GetRasterCount();
+    if (bandCount < 3) {
+        std::cerr << "[ERROR] Not enough bands (RGB expected): " << path << std::endl;
+        return false;
+    }
+
+    int sampleSize = 500;
+    int xOff = std::max(0, width / 2 - sampleSize / 2);
+    int yOff = std::max(0, height / 2 - sampleSize / 2);
+    int winX = std::min(sampleSize, width - xOff);
+    int winY = std::min(sampleSize, height - yOff);
+
+    std::vector<float> buffer(winX * winY);
+    double totalStdDev = 0.0;
+    for (int i = 1; i <= 3; ++i) {
+        GDALRasterBand* band = dataset->GetRasterBand(i);
+        if (!band || band->RasterIO(GF_Read, xOff, yOff, winX, winY,
+                           buffer.data(), winX, winY, GDT_Float32,
+                           0, 0) != CE_None) {
+            std::cerr << "[ERROR] Failed to read band " << i << " of image: " << path << std::endl;
+            return false;
+        }
+
+        double sum = 0.0, sqSum = 0.0;
+        for (float val : buffer) {
+            sum += val;
+            sqSum += val * val;
+        }
+        double n = buffer.size();
+        double mean = sum / n;
+        double stddev = std::sqrt((sqSum / n) - (mean * mean));
+        totalStdDev += stddev;
+    }
+
+    bool rgbValid = totalStdDev >= config_.rgbValidationThreshold;
+
+    bool alphaValid = true;
+    if (bandCount >= 4) {
+        GDALRasterBand* alphaBand = dataset->GetRasterBand(4);
+        if (!alphaBand || alphaBand->RasterIO(GF_Read, xOff, yOff, winX, winY,
+                                buffer.data(), winX, winY, GDT_Float32,
+                                0, 0) != CE_None) {
+            std::cerr << "[WARN] Could not read alpha band — skipping transparency check." << std::endl;
+        } else {
+            int visiblePixels = std::count_if(buffer.begin(), buffer.end(), [](float v) {
+                return v > 10.0f; // Check if more than 10% of image is transparent
+            });
+            double visibleFraction = (double)visiblePixels / buffer.size();
+            if (visibleFraction < config_.alphaValidationThreshold) {
+                alphaValid = false;
+            }
+        }
+    }
+
+    if (!rgbValid && !alphaValid) {
+        std::cerr << "[ERROR] Rejected: low RGB variance and mostly transparent: " << path << std::endl;
+        return false;
+    }
+
+    if (!rgbValid) {
+        std::cerr << "[WARN] Low RGB variance (stddev=" << totalStdDev << "): " << path << std::endl;
+    }
+
+    if (!alphaValid) {
+        std::cerr << "[WARN] Alpha band mostly transparent in central region: " << path << std::endl;
+    }
+
+    return true;
+}
+
+bool BatchProcessor::getRasterInfo(const fs::path& path, double gt[6], std::optional<std::string>& proj_wkt, int& width, int& height) {
+    GDALDatasetRAII dataset((GDALDataset*)GDALOpen(path.string().c_str(), GA_ReadOnly));
+    if (!dataset) {
+        std::cerr << "[ERROR] Could not open raster: " << path << std::endl;
+        return false;
+    }
+
+    if (dataset->GetGeoTransform(gt) != CE_None) {
+        std::cerr << "[ERROR] Could not get geotransform for: " << path << std::endl;
+        return false;
+    }
+
+    const char* pszWKT = dataset->GetProjectionRef();
+    if (pszWKT == nullptr || std::string(pszWKT).empty()) {
+        std::cerr << "[WARNING] No projection found for: " << path << std::endl;
+        proj_wkt = std::nullopt;
+    } else {
+        proj_wkt = std::string(pszWKT); // Directly convert to std::string
+    }
+
+    width = dataset->GetRasterXSize();
+    height = dataset->GetRasterYSize();
+
+    return true;
+}
+
+void BatchProcessor::calculateUnionExtent(double gt1[6], int w1, int h1, double gt2[6], int w2, int h2,
+                                          double& union_minX, double& union_maxY, double& union_maxX, double& union_minY,
+                                          double& avg_resX, double& avg_resY) {
+    auto get_corners = [](double gt[6], int w, int h) -> std::vector<std::pair<double, double>> {
+        std::vector<std::pair<double, double>> corners;
+        corners.push_back({gt[0], gt[3]}); // Ul: (0,0)
+        corners.push_back({gt[0] + gt[1] * w, gt[3] + gt[4] * w}); // Ur: (w,0)
+        corners.push_back({gt[0] + gt[1] * w + gt[2] * h, gt[3] + gt[4] * w + gt[5] * h}); // Lr: (w,h)
+        corners.push_back({gt[0] + gt[2] * h, gt[3] + gt[5] * h}); // Ll: (0,h)
+        return corners;
+    };
+
+    std::vector<std::pair<double, double>> corners1 = get_corners(gt1, w1, h1);
+    std::vector<std::pair<double, double>> corners2 = get_corners(gt2, w2, h2);
+
+    std::vector<double> all_xs, all_ys;
+    for (const auto& p : corners1) { all_xs.push_back(p.first); all_ys.push_back(p.second); }
+    for (const auto& p : corners2) { all_xs.push_back(p.first); all_ys.push_back(p.second); }
+
+    union_minX = *std::min_element(all_xs.begin(), all_xs.end());
+    union_maxX = *std::max_element(all_xs.begin(), all_xs.end());
+    union_minY = *std::min_element(all_ys.begin(), all_ys.end());
+    union_maxY = *std::max_element(all_ys.begin(), all_ys.end());
+
+    avg_resX = (std::abs(gt1[1]) + std::abs(gt2[1])) / 2.0;
+    avg_resY = (std::abs(gt1[5]) + std::abs(gt2[5])) / 2.0;
+}
+
+void BatchProcessor::mergeWithOTB(const fs::path& ortho_path) {
+    std::lock_guard<std::mutex> lock(mosaicMutex_);
+
+    auto now   = std::chrono::system_clock::now();
+    auto now_c = std::chrono::system_clock::to_time_t(now);
+    std::stringstream ts_ss;
+    ts_ss << std::put_time(std::localtime(&now_c), "%Y%m%d_%H%M%S");
+    std::string timestamp = ts_ss.str();
+
+    fs::path stitched_parent_dir = fs::path(STITCHED_FILE).parent_path();
+    fs::create_directories(stitched_parent_dir);
+    
+    if (!fs::exists(STITCHED_FILE)) {
+        try {
+            fs::copy_file(ortho_path, STITCHED_FILE, fs::copy_options::overwrite_existing);
+            std::cout << "[INFO] Mosaic initialized with: " << STITCHED_FILE << "\n";
+            return;
+        } catch (const fs::filesystem_error& e) {
+            std::cerr << "[ERROR] Failed to initialize mosaic: " << e.what() << std::endl;
+            return;
+        }
+    }
+
+    if (config_.savePreviousOrthophoto) {
+        fs::path bak_path = stitched_parent_dir / ("prev_mosaic_" + timestamp + ".tif");
+        try {
+            fs::copy_file(STITCHED_FILE, bak_path, fs::copy_options::overwrite_existing);
+            std::cout << "[DEBUG] Previous mosaic backed up to: " << bak_path << std::endl;
+        } catch (const fs::filesystem_error& e) {
+            std::cerr << "[WARN] Failed to backup previous mosaic: " << e.what() << std::endl;
+        }
+    }
+
+    double mosaic_gt[6];
+    std::optional<std::string> mosaic_proj_wkt_opt;
+    int mosaic_width, mosaic_height;
+    if (!getRasterInfo(STITCHED_FILE, mosaic_gt, mosaic_proj_wkt_opt, mosaic_width, mosaic_height)) {
+        std::cerr << "[ERROR] Could not get info for existing mosaic: " << STITCHED_FILE << std::endl;
+        return;
+    }
+
+    double new_ortho_gt[6];
+    std::optional<std::string> new_ortho_proj_wkt_opt;
+    int new_ortho_width, new_ortho_height;
+    if (!getRasterInfo(ortho_path, new_ortho_gt, new_ortho_proj_wkt_opt, new_ortho_width, new_ortho_height)) {
+        std::cerr << "[ERROR] Could not get info for new orthophoto: " << ortho_path << std::endl;
+        return;
+    }
+
+    if (!mosaic_proj_wkt_opt.has_value() || mosaic_proj_wkt_opt->empty()) {
+        std::cerr << "[ERROR] Mosaic has no projection, cannot proceed with gdalwarp for growth.\n";
+        return;
+    }
+
+    double union_minX, union_maxY, union_maxX, union_minY;
+    double avg_resX, avg_resY;
+    calculateUnionExtent(
+        mosaic_gt, mosaic_width, mosaic_height,
+        new_ortho_gt, new_ortho_width, new_ortho_height,
+        union_minX, union_maxY, union_maxX, union_minY,
+        avg_resX, avg_resY
+    );
+
+    fs::path mosaic_wkt_tmp_file_path = stitched_parent_dir / ("mosaic_proj_" + timestamp + ".wkt");
+    TemporaryPath mosaic_wkt_tmp_file(mosaic_wkt_tmp_file_path);
+    {
+        std::ofstream wkt_file(mosaic_wkt_tmp_file.get_path());
+        if (!wkt_file.is_open()) {
+            std::cerr << "[ERROR] Could not create temporary WKT file: " << mosaic_wkt_tmp_file.get_path() << std::endl;
+            return;
+        }
+        wkt_file << *mosaic_proj_wkt_opt;
+        wkt_file.close();
+    }
+
+    fs::path new_ortho_warped_expanded_path = stitched_parent_dir / ("new_ortho_warped_expanded_" + timestamp + ".tif");
+    TemporaryPath new_ortho_warped_expanded(new_ortho_warped_expanded_path);
+    {
+        std::stringstream gdalwarp_cmd;
+        gdalwarp_cmd << "gdalwarp "
+                     << "-t_srs \"" << mosaic_wkt_tmp_file.get_path().string() << "\" "
+                     << "-te " << std::fixed << std::setprecision(10) << union_minX << " "
+                     << std::fixed << std::setprecision(10) << union_minY << " "
+                     << std::fixed << std::setprecision(10) << union_maxX << " "
+                     << std::fixed << std::setprecision(10) << union_maxY << " "
+                     << "-tr " << std::fixed << std::setprecision(10) << avg_resX << " "
+                     << std::fixed << std::setprecision(10) << avg_resY << " "
+                     << "-r bilinear "
+                     << "-dstalpha "
+                     << "-srcnodata 0 "
+                     << "-dstnodata 0 "
+                     << "\"" << ortho_path.string() << "\" "
+                     << "\"" << new_ortho_warped_expanded.get_path().string() << "\" ";
+
+        if (runCommand(gdalwarp_cmd.str()) != 0) {
+            std::cerr << "[ERROR] gdalwarp failed to align and expand new orthophoto. Cannot grow mosaic.\n";
+            return;
+        }
+        std::cout << "[INFO] New orthophoto warped and expanded to: " << new_ortho_warped_expanded.get_path() << std::endl;
+    }
+
+    fs::path tmp_mosaic_unoptimized_path = stitched_parent_dir / ("tmp_mosaic_unoptimized_" + timestamp + ".tif");
+    TemporaryPath tmp_mosaic_unoptimized(tmp_mosaic_unoptimized_path);
+    {
+        std::stringstream mosaic_cmd;
+        mosaic_cmd << "otbcli_Mosaic -il "
+                   << "\"" << STITCHED_FILE << "\" "
+                   << "\"" << new_ortho_warped_expanded.get_path().string() << "\" "
+                   << "-comp.feather slim "
+                   << "-comp.feather.slim.length 10 "
+                   << "-comp.feather.slim.exponent 1.0 "
+                   << "-harmo.method band "
+                   << "-harmo.cost rmse "
+                   << "-interpolator bco "
+                   << "-interpolator.bco.radius 2 "
+                   << "-out \"" << tmp_mosaic_unoptimized.get_path().string() << "\" uint8 ";
+
+        std::cout << "[DEBUG] OTB Mosaic Command: " << mosaic_cmd.str() << std::endl;
+        if (runCommand(mosaic_cmd.str()) != 0) {
+            std::cerr << "[ERROR] otbcli_Mosaic failed. Command: " << mosaic_cmd.str() << std::endl;
+            return;
+        }
+    }
+
+    fs::path tmp_mosaic_optimized_path = stitched_parent_dir / ("tmp_mosaic_optimized_" + timestamp + ".tif");
+    TemporaryPath tmp_mosaic_optimized(tmp_mosaic_optimized_path);
+    {
+        std::stringstream gdal_translate_cmd;
+        gdal_translate_cmd << "gdal_translate "
+                 << "\"" << tmp_mosaic_unoptimized.get_path().string() << "\" "
+                 << "\"" << tmp_mosaic_optimized.get_path().string() << "\" "
+                 << "-co \"TILED=YES\" ";
+
+        if (config_.compress) gdal_translate_cmd << "-co \"COMPRESS=DEFLATE\" ";
+        if (config_.useBigTIFF) gdal_translate_cmd << "-co \"BIGTIFF=YES\" ";
+        gdal_translate_cmd << "-co \"BLOCKXSIZE=" << config_.blockSize << "\" "
+                 << "-co \"BLOCKYSIZE=" << config_.blockSize << "\" ";
+
+        if (runCommand(gdal_translate_cmd.str()) != 0) {
+            std::cerr << "[ERROR] gdal_translate failed to optimize output mosaic. Proceeding with unoptimized file.\n";
+            try { // If optimization fails, try to use the unoptimized file
+                fs::rename(tmp_mosaic_unoptimized.release(), STITCHED_FILE);
+                std::cout << "[INFO] Successfully updated stitched orthomosaic (unoptimized) at: " << STITCHED_FILE << std::endl;
+            } catch (const fs::filesystem_error& e) {
+                std::cerr << "[ERROR] Failed to replace stitched file with unoptimized version: " << e.what() << std::endl;
+            }
+            return;
+        }
+    }
+
+    try {
+        fs::rename(tmp_mosaic_optimized.release(), STITCHED_FILE);
+        std::cout << "[INFO] Successfully updated stitched orthomosaic at: " << STITCHED_FILE << std::endl;
+    } catch (const fs::filesystem_error& e) {
+        std::cerr << "[ERROR] Failed to replace stitched file: " << e.what() << std::endl;
+        return;
+    }
+}
+
+bool BatchProcessor::runOdmBatchSuccessful(const fs::path& batch_path, const fs::path& ortho_path) {
+    std::size_t retryCount = 0;
+    std::size_t effectiveRetries = config_.retry ? config_.retries : 1;
+
+    while (retryCount < effectiveRetries && !stopSignal_) {
+        std::cout << "[INFO] Processing batch (attempt #" << retryCount + 1 << " of " << effectiveRetries << "): " << batch_path << std::endl;
+
+        OdmRunResult result = OdmRunResult::CommandFailed;
+
+        if (runOdmBatchInternal(batch_path)) {
+            if (!fs::exists(ortho_path)) {
+                result = OdmRunResult::OrthophotoNotFound;
+                std::cerr << "[ERROR] Orthophoto not found after ODM run: " << ortho_path << std::endl;
+            } else {
+                try {
+                    auto file_size = fs::file_size(ortho_path);
+                    if (file_size == 0) {
+                        result = OdmRunResult::OrthophotoZeroBytes;
+                        std::cerr << "[ERROR] Orthophoto is 0 bytes: " << ortho_path << std::endl;
+                    } else {
+                        if (!validateGeotiff(ortho_path)) {
+                            result = OdmRunResult::ValidationFailed;
+                            std::cerr << "[ERROR] Orthophoto failed GDAL validation: " << ortho_path << std::endl;
+                        } else {
+                            result = OdmRunResult::Success;
+                        }
+                    }
+                } catch (const fs::filesystem_error& e) {
+                    result = OdmRunResult::OrthophotoNotFound;
+                    std::cerr << "[ERROR] Failed to get file size for " << ortho_path << ": " << e.what() << std::endl;
+                }
+            }
+        } else {
+            // ODM command failed already handled by runOdmBatchInternal return
+        }
+
+        if (result == OdmRunResult::Success) {
+            std::cout << "[INFO] Orthophoto passed validation: " << ortho_path << std::endl;
+            return true;
+        } else {
+            std::string err_message;
+            switch (result) {
+                case OdmRunResult::OrthophotoNotFound:
+                    err_message = "[ERROR] Orthophoto not found after ODM run. Retrying...";
+                    break;
+                case OdmRunResult::OrthophotoZeroBytes:
+                    err_message = "[ERROR] Orthophoto is 0 bytes. Deleting and retrying...";
+                    break;
+                case OdmRunResult::ValidationFailed:
+                    err_message = "[ERROR] Orthophoto failed GDAL validation. Deleting and retrying...";
+                    break;
+                case OdmRunResult::CommandFailed:
+                    err_message = "[ERROR] ODM command failed for batch: " + batch_path.string() + ". Retrying...";
+                    break;
+                default:
+                    err_message = "[ERROR] Unhandled ODM processing error. Retrying...";
+                    break;
+            }
+            
+            try {
+                if (fs::exists(batch_path / "odm_orthophoto")) {
+                    fs::remove_all(batch_path / "odm_orthophoto");
+                    std::cout << "[DEBUG] Cleaned partial ODM output for retry: " << (batch_path / "odm_orthophoto") << std::endl;
+                }
+            } catch (const fs::filesystem_error& e) {
+                std::cerr << "[WARN] Failed to clean partial ODM output for retry: " << e.what() << std::endl;
+            }
+
+            ++retryCount;
+            if (stopSignal_) return false;
+            if (retryCount < effectiveRetries) {
+                 std::this_thread::sleep_for(std::chrono::seconds(config_.retryTimeoutSec));
+            }
+        }
+    }
+    return false;
+}
