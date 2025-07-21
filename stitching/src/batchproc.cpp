@@ -54,6 +54,7 @@ void BatchProcessor::processBatchesLoop() {
             }
         }
     }
+    std::cout << "[INFO] BatchProcessor loop stopped." << std::endl;
 }
 
 fs::path BatchProcessor::createBatchDirectory(const std::vector<fs::path>& images, int batch_id) {
