@@ -76,3 +76,46 @@ void copyMetadata(const std::string& sourceImagePath, const std::string& destIma
         std::cerr << "ExifTool command failed with exit code " << result << ": " << cmd << "\n";
     }
 }
+
+void assignMetadata(const std::string& imagePath, const std::unordered_map<std::string, std::string>& tags) {
+    std::ostringstream cmdStream;
+    cmdStream << "exiftool -overwrite_original";
+
+    std::vector<std::string> standardTags = {
+        "GPSAltitude", "FocalLength", "GPSLatitude", "GPSLongitude", "GPSImgDirection",
+        "ExposureTime", "ISO", "CreateDate", "DateTimeOriginal", "Make", "Model"
+    };
+
+    std::vector<std::string> userCommentParts;
+
+    for (const auto& [key, value] : tags) {
+        std::string normalizedKey = key;
+        std::string strippedKey;
+        for (char ch : key) {
+            if (ch != ' ') strippedKey += ch;
+        }
+
+        if (std::find(standardTags.begin(), standardTags.end(), strippedKey) != standardTags.end()) {
+            cmdStream << " -" << strippedKey << "=\"" << value << "\"";
+        } else {
+            userCommentParts.push_back(key + "=" + value);
+        }
+    }
+
+    if (!userCommentParts.empty()) {
+        cmdStream << " -UserComment=\"";
+        for (size_t i = 0; i < userCommentParts.size(); ++i) {
+            if (i > 0) cmdStream << ",";
+            cmdStream << userCommentParts[i];
+        }
+        cmdStream << "\"";
+    }
+
+    cmdStream << " \"" << imagePath << "\"";
+
+    std::string cmd = cmdStream.str();
+    int result = system(cmd.c_str());
+    if (result != 0) {
+        std::cerr << "Failed to assign metadata. Command:\n" << cmd << "\nExit code: " << result << "\n";
+    }
+}
