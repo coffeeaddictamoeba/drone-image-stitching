@@ -107,7 +107,23 @@ void Deblurrer::blurImage(const std::string &inputPath, const std::string &outpu
     }
     float speed = std::stof(metadata["FlightSpeed"]);
     float yaw = std::stof(metadata["DroneYaw"]);
-    float exposure = std::stof(metadata["Exposure Time"]);
+    float exposure;
+    std::string exposure_str = metadata["Exposure Time"];
+    size_t slash_pos = exposure_str.find('/');
+
+    // as exposure is usually written as 1/10, 1/1024, etc.
+    if (slash_pos != std::string::npos) {
+        float numerator = std::stof(exposure_str.substr(0, slash_pos));
+        float denominator = std::stof(exposure_str.substr(slash_pos + 1));
+        if (denominator != 0) {
+            exposure = numerator / denominator;
+        } else {
+            std::cerr << "Warning: Exposure Time denominator is zero. Defaulting to 1.0s.\n";
+            exposure = 1.0f;
+        }
+    } else {
+        exposure = std::stof(exposure_str);
+    }
 
     float gsd = calculateGSD(inputPath); // mm/px
     float blur = speed * 1000.0f * exposure; // mm
@@ -241,6 +257,7 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
         cv::Mat psfMag2;
         cv::magnitude(psfPlanes[0], psfPlanes[1], psfMag2);
         psfMag2 = psfMag2.mul(psfMag2) + (1.0f / snr);
+        psfMag2 += 1e-6f;  // Numerical floor
 
         // Conjugate PSF
         psfPlanes[1] *= -1;
@@ -331,9 +348,28 @@ void Deblurrer::deblurImage(const std::string &inputPath, const std::string &out
     auto metadata = extractImageMetadata(inputPath);
     float speed = std::stof(metadata["FlightSpeed"]);
     float yaw = std::stof(metadata["DroneYaw"]);
-    float exposure = std::stof(metadata["Exposure Time"]);
+
+    float exposure; // as exposure is usually 1/10, 1/1024, etc.
+    std::string exposure_str = metadata["Exposure Time"];
+    size_t slash_pos = exposure_str.find('/');
+    if (slash_pos != std::string::npos) {
+        float numerator = std::stof(exposure_str.substr(0, slash_pos));
+        float denominator = std::stof(exposure_str.substr(slash_pos + 1));
+        if (denominator != 0) {
+            exposure = numerator / denominator;
+        } else {
+            std::cerr << "Warning: Exposure Time denominator is zero. Defaulting to 1.0s.\n";
+            exposure = 1.0f;
+        }
+    } else {
+        exposure = std::stof(exposure_str);
+    }
+
     float gsd = calculateGSD(inputPath);
     float blur_mm = speed * 1000.0f * exposure;
+
+    std::cout << "DEBUG: Calculated blur_mm: " << blur_mm << " mm\n";
+
     int blur_px = std::max(1, static_cast<int>(blur_mm / gsd));
 
     std::cout << "Deblurring with blur length: " << blur_px << " px, yaw: " << yaw << " deg\n";
@@ -342,13 +378,13 @@ void Deblurrer::deblurImage(const std::string &inputPath, const std::string &out
     findPSF(blur_px, yaw, psf);
 
     cv::Mat deblurred;
-    wienerDeconvolution(blurred, psf, deblurred, 1000.0);
+    wienerDeconvolution(blurred, psf, deblurred, 500.0);
     cv::imwrite("temp_deblurred.jpg", deblurred);
 
     if (!deblurred.empty()) {
         std::cout << "[Info] Applying post-deconvolution denoising.\n";
-        float h_denoise = 10.0f;
-        float hColor_denoise = 10.0f;
+        float h_denoise = 1.0f;
+        float hColor_denoise = 1.0f;
         int templateWindowSize = 7;
         int searchWindowSize = 21;
         denoiseImage(deblurred, h_denoise, hColor_denoise, templateWindowSize, searchWindowSize);
@@ -369,7 +405,7 @@ int main(int argc, char** argv) {
         Deblurrer db;
         db.createTestImage();
         return 0;
-    } else if (argc == 3 and std::strcmp(argv[1], "-b") == 0) { // blur image instead of deblurring (useful for testing)
+    } else if (argc == 3 and std::strcmp(argv[1], "--blur") == 0) { // blur image instead of deblurring (useful for testing)
         std::string imageToBlur = argv[2];
 
         std::string imageName = imageToBlur.substr(0, imageToBlur.find('.'));
