@@ -54,31 +54,36 @@ std::unordered_map<std::string, std::string> Deblurrer::createSyntheticMetadata(
 }
 
 void Deblurrer::findPSF(int blurLengthPx, float yawDeg, cv::Mat& syntheticPSF) {
+    if (blurLengthPx < 1) blurLengthPx = 1;
+
     int ksize = std::max(blurLengthPx * 2 + 1, 15);
+    if (ksize % 2 == 0) ksize += 1;
+
     syntheticPSF = cv::Mat::zeros(ksize, ksize, CV_32F);
+    cv::Point2f center(static_cast<float>(ksize) / 2.0f, static_cast<float>(ksize) / 2.0f);
 
     float angleRad = yawDeg * CV_PI / 180.0f;
-    cv::Point center(ksize / 2, ksize / 2);
 
     float dx = std::cos(angleRad);
     float dy = std::sin(angleRad);
 
-    cv::Point pt1(center.x - std::round(blurLengthPx * 0.5f * dx),
-                  center.y - std::round(blurLengthPx * 0.5f * dy));
-    cv::Point pt2(center.x + std::round(blurLengthPx * 0.5f * dx),
-                  center.y + std::round(blurLengthPx * 0.5f * dy));
+    float halfLen = blurLengthPx * 0.5f;
+    cv::Point2f pt1(center.x - dx * halfLen, center.y - dy * halfLen);
+    cv::Point2f pt2(center.x + dx * halfLen, center.y + dy * halfLen);
 
     cv::line(syntheticPSF, pt1, pt2, cv::Scalar(1.0f), 1, cv::LINE_AA);
 
-    cv::GaussianBlur(syntheticPSF, syntheticPSF, cv::Size(3, 3), 0.3);
+    int blurSize = (blurLengthPx > 20) ? 5 : 3;
+    float sigma = (blurLengthPx > 20) ? 1.0f : 0.3f;
+    if (blurSize % 2 == 0) blurSize += 1;
+    cv::GaussianBlur(syntheticPSF, syntheticPSF, cv::Size(blurSize, blurSize), sigma, sigma);
 
     double sumVal = cv::sum(syntheticPSF)[0];
     if (sumVal <= 0.0) {
-        std::cerr << "[ERROR] PSF generation failed — invalid normalization.\n";
+        std::cerr << "[ERROR] PSF generation failed — normalization invalid.\n";
         syntheticPSF.setTo(0);
         return;
     }
-
     syntheticPSF /= static_cast<float>(sumVal);
 
     cv::Mat psfDebug;
@@ -190,115 +195,88 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
         return;
     }
 
-    // Convert to grayscale for stable filtering
-    cv::Mat gray;
-    if (input.channels() == 3)
-        cv::cvtColor(input, gray, cv::COLOR_BGR2GRAY);
-    else
-        gray = input.clone();
+    // Convert to float32
+    cv::Mat inputF;
+    input.convertTo(inputF, CV_32F, 1.0 / 255.0);
 
-    gray.convertTo(gray, CV_32F, 1.0 / 255.0);
-
-    // Convert PSF to float
+    // Normalize PSF
     cv::Mat normPSF;
     psf.convertTo(normPSF, CV_32F);
-    double psfSum = cv::sum(normPSF)[0];
-    if (psfSum <= 0.0) {
-        std::cerr << "[Error] PSF has zero or negative sum.\n";
+    double sumPSF = cv::sum(normPSF)[0];
+    if (sumPSF <= 0.0) {
+        std::cerr << "[ERROR] PSF sum is zero.\n";
         return;
     }
-    normPSF /= static_cast<float>(psfSum);
+    normPSF /= static_cast<float>(sumPSF);
 
-    // Pad PSF to same size as image
-    cv::Mat paddedPSF = cv::Mat::zeros(gray.size(), CV_32F);
+    // Pad PSF to match input size
+    cv::Mat paddedPSF = cv::Mat::zeros(inputF.rows, inputF.cols, CV_32F);
     int x = (paddedPSF.cols - normPSF.cols) / 2;
     int y = (paddedPSF.rows - normPSF.rows) / 2;
     normPSF.copyTo(paddedPSF(cv::Rect(x, y, normPSF.cols, normPSF.rows)));
+
+    // FFT shift (center PSF)
     fftShift(paddedPSF);
 
-    if (gray.type() != CV_32F) {
-        gray.convertTo(gray, CV_32F, 1.0 / 255.0);
-    }
-
-    cv::Mat tapered;
-    cv::edgePreservingFilter(gray, tapered, 1, 60, 0.4f);
-    if (tapered.type() != CV_32F) {
-        tapered.convertTo(tapered, CV_32F, 1.0 / 255.0);
-    }
-
-    cv::addWeighted(gray, 0.8f, tapered, 0.2f, 0.0, gray);
-
-    // Continue to DFT
-    cv::Mat imgDFT, psfDFT;
-    cv::dft(gray, imgDFT, cv::DFT_COMPLEX_OUTPUT);
+    // DFT of PSF
+    cv::Mat psfDFT;
     cv::dft(paddedPSF, psfDFT, cv::DFT_COMPLEX_OUTPUT);
 
-    // Compute Wiener filter in frequency domain
-    std::vector<cv::Mat> psfPlanes(2);
-    cv::split(psfDFT, psfPlanes);
-
-    cv::Mat psfMag;
-    cv::magnitude(psfPlanes[0], psfPlanes[1], psfMag);
-    cv::Mat denom = psfMag.mul(psfMag) + (1.0f / snr);
-
-    // Conjugate PSF
-    psfPlanes[1] = -psfPlanes[1];
-    cv::Mat psfConj;
-    cv::merge(psfPlanes, psfConj);
-
-    // Multiply input DFT with conjugate PSF
-    std::vector<cv::Mat> imgPlanes(2);
-    cv::split(imgDFT, imgPlanes);
-
-    cv::Mat realPart = imgPlanes[0].mul(psfPlanes[0]) - imgPlanes[1].mul(psfPlanes[1]);
-    cv::Mat imagPart = imgPlanes[0].mul(psfPlanes[1]) + imgPlanes[1].mul(psfPlanes[0]);
-
-    realPart /= denom;
-    imagPart /= denom;
-
-    cv::Mat wienerDFT;
-    cv::merge(std::vector<cv::Mat>{realPart, imagPart}, wienerDFT);
-
-    // Inverse DFT
-    cv::Mat resultFloat;
-    cv::idft(wienerDFT, resultFloat, cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
-
-    cv::normalize(resultFloat, resultFloat, 0, 1, cv::NORM_MINMAX);
-    resultFloat.convertTo(resultFloat, CV_8U, 255.0);
-
-    if (input.channels() == 3) {
-        std::vector<cv::Mat> bgrChannels;
-        cv::split(input, bgrChannels);
-
-        cv::Mat resultNormalized;
-        if (resultFloat.type() != CV_32F) {
-            resultFloat.convertTo(resultNormalized, CV_32F, 1.0 / 255.0);
-        } else {
-            resultNormalized = resultFloat / 255.0f;
-        }
-
-        if (resultNormalized.size() != input.size()) {
-            cv::resize(resultNormalized, resultNormalized, input.size());
-        }
-
-        // Blend each channel
-        for (int c = 0; c < 3; ++c) {
-            if (bgrChannels[c].type() != CV_32F) {
-                bgrChannels[c].convertTo(bgrChannels[c], CV_32F, 1.0 / 255.0);
-            }
-
-            cv::addWeighted(bgrChannels[c], 0.6f, resultNormalized, 0.4f, 0.0, bgrChannels[c]);
-
-            // Clamp to valid range [0, 1]
-            cv::threshold(bgrChannels[c], bgrChannels[c], 1.0, 1.0, cv::THRESH_TRUNC);
-            cv::threshold(bgrChannels[c], bgrChannels[c], 0.0, 0.0, cv::THRESH_TOZERO);
-            bgrChannels[c].convertTo(bgrChannels[c], CV_8U, 255.0);
-        }
-
-        cv::merge(bgrChannels, output);
+    // Handle grayscale or color
+    std::vector<cv::Mat> channels;
+    if (inputF.channels() == 1) {
+        channels.push_back(inputF);
     } else {
-        resultFloat.convertTo(output, CV_8U, 255.0);
+        cv::split(inputF, channels);
     }
+
+    std::vector<cv::Mat> resultChannels;
+    for (auto& ch : channels) {
+        cv::Mat imgDFT;
+        cv::dft(ch, imgDFT, cv::DFT_COMPLEX_OUTPUT);
+
+        // Split PSF DFT
+        std::vector<cv::Mat> psfPlanes(2);
+        cv::split(psfDFT, psfPlanes);
+        cv::Mat psfMag2;
+        cv::magnitude(psfPlanes[0], psfPlanes[1], psfMag2);
+        psfMag2 = psfMag2.mul(psfMag2) + (1.0f / snr);
+
+        // Conjugate PSF
+        psfPlanes[1] *= -1;
+        cv::Mat psfConj;
+        cv::merge(psfPlanes, psfConj);
+
+        // Multiply image DFT with PSF conjugate
+        std::vector<cv::Mat> imgPlanes(2);
+        cv::split(imgDFT, imgPlanes);
+        cv::Mat real = imgPlanes[0].mul(psfPlanes[0]) - imgPlanes[1].mul(psfPlanes[1]);
+        cv::Mat imag = imgPlanes[0].mul(psfPlanes[1]) + imgPlanes[1].mul(psfPlanes[0]);
+
+        real /= psfMag2;
+        imag /= psfMag2;
+
+        cv::Mat wienerDFT;
+        std::vector<cv::Mat> mergePlanes = { real, imag };
+        cv::merge(mergePlanes, wienerDFT);
+
+        // Inverse DFT
+        cv::Mat restored;
+        cv::idft(wienerDFT, restored, cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
+
+        // Clamp to [0, 1]
+        cv::threshold(restored, restored, 1.0, 1.0, cv::THRESH_TRUNC);
+        cv::threshold(restored, restored, 0.0, 0.0, cv::THRESH_TOZERO);
+        resultChannels.push_back(restored);
+    }
+
+    cv::Mat resultF;
+    if (resultChannels.size() == 1) {
+        resultF = resultChannels[0];
+    } else {
+        cv::merge(resultChannels, resultF);
+    }
+    resultF.convertTo(output, CV_8U, 255.0);
 }
 
 void Deblurrer::denoiseImage(cv::Mat& image, float h, float hColor, int templateWindowSize, int searchWindowSize) {
