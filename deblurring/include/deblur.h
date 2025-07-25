@@ -12,7 +12,7 @@ class Deblurrer {
 
         void createTestImage();
         void blurImage(const std::string &inputPath, const std::string &outputImagePath, bool grayscale);
-        void deblurImage(const std::string &inputPath, const std::string &outputImagePath);
+        void deblurImage(const std::string &inputPath, const std::string &outputImagePath, float snr);
     
     private:
         // for actual deblurring
@@ -20,7 +20,7 @@ class Deblurrer {
         void fftShift(cv::Mat& input);
         void findPSF(int blurLengthPx, float yaw, cv::Mat &syntheticPSF);
         void wienerDeconvolution(const cv::Mat& blurred, const cv::Mat& psf, cv::Mat& outputImage, float snr);
-        void denoiseImage(cv::Mat& image, float h, float hColor, int templateWindowSize, int searchWindowSize);
+        void denoiseImage(cv::Mat& image, float strength, float edgeStrength);
         void recoverBrightness(cv::Mat& image, float gamma);
 
         // for testing purposes
