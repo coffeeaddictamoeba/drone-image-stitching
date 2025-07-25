@@ -1,4 +1,5 @@
 #include "../include/metadata.h"
+#include <cstring>
 #include <iostream>
 #include <regex>
 #include <sstream>
@@ -48,7 +49,9 @@ void copyMetadata(const std::string& sourceImagePath, const std::string& destIma
     std::vector<std::string> tagsToCopy = {
         "-CameraModelName", "-Make", "-Software", "-ModifyDate", "-ExposureTime", "-ISO",
         "-DateTimeOriginal", "-CreateDate", "-FocalLength",
-        "-GPSVersionID", "-GPSLatitude", "-GPSLongitude", "-GPSAltitude", "-GPSImgDirection"
+        "-GPSVersionID", "-GPSLatitude", "-GPSLongitude", "-GPSAltitude", "-GPSImgDirection",
+        "-GPSSpeed", "-GPSSpeedRef", "-FlightPitchDegree", "-FlightYawDegree", 
+        "-FlightRollDegree"
     };
 
     for (const auto& tag : tagsToCopy) {
@@ -83,7 +86,9 @@ void assignMetadata(const std::string& imagePath, const std::unordered_map<std::
 
     std::vector<std::string> standardTags = {
         "GPSAltitude", "FocalLength", "GPSLatitude", "GPSLongitude", "GPSImgDirection",
-        "ExposureTime", "ISO", "CreateDate", "DateTimeOriginal", "Make", "Model"
+        "GPSSpeed", "GPSSpeedRef", "ExposureTime", "ISO", "CreateDate", 
+        "DateTimeOriginal", "Make", "Model", "FlightPitchDegree", "FlightYawDegree", 
+        "FlightRollDegree"
     };
 
     std::vector<std::string> userCommentParts;
@@ -118,4 +123,37 @@ void assignMetadata(const std::string& imagePath, const std::unordered_map<std::
     if (result != 0) {
         std::cerr << "Failed to assign metadata. Command:\n" << cmd << "\nExit code: " << result << "\n";
     }
+}
+
+// needed as exposure is usually written as 1/10, 1/1024, etc.
+float parseExifExposureTime(std::string &exposure_str) {
+    float exposure = 0.0;;
+    size_t slash_pos = exposure_str.find('/');
+    if (slash_pos != std::string::npos) {
+        float numerator = std::stof(exposure_str.substr(0, slash_pos));
+        float denominator = std::stof(exposure_str.substr(slash_pos + 1));
+        if (denominator != 0) {
+            exposure = numerator / denominator;
+        } else {
+            std::cerr << "Warning: Exposure Time denominator is zero. Defaulting to 1.0s.\n";
+            exposure = 1.0f;
+        }
+    } else {
+        exposure = std::stof(exposure_str);
+    }
+    return exposure;
+}
+
+// returns gps speed in m/s
+float parseExifGPSSpeed(std::string &gpsspeed_str, std::string &gpsspeedref_str) {
+    float speed = std::stof(gpsspeed_str);
+    if (std::strcmp(gpsspeedref_str.c_str(), "km/h") == 0) {
+        speed = speed * 1000 / 3600; // km/h -> m/s
+    } else if (std::strcmp(gpsspeedref_str.c_str(), "mph") == 0) {
+        speed = static_cast<float>(speed * 1609.34 / 3600); // mph -> m/s
+    } else {
+        std::cout << "[Warn] Using direct result of GPS Speed (Required units: m/s): " << speed << "\n";
+        return speed; // assuming that m/s requirement is satisfied
+    }
+    return speed;
 }

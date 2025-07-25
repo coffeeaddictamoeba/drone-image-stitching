@@ -7,7 +7,15 @@
 #include <string>
 #include <unordered_map>
 
-cv::Mat Deblurrer::createSyntheticTestImage(int width = 640, int height = 480) {
+Deblurrer::Deblurrer(DeblurConfig &config) {
+    this->config_ = config;
+}
+
+
+// -------------------- TEST IMAGE GENERATION AND BLUR -----------------------
+
+// creates test image
+cv::Mat Deblurrer::createTestImage(int width = 640, int height = 480) {
     cv::Mat canvas(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
 
     cv::line(canvas, cv::Point(50, 100), cv::Point(600, 100), cv::Scalar(0, 0, 0), 2);
@@ -22,26 +30,34 @@ cv::Mat Deblurrer::createSyntheticTestImage(int width = 640, int height = 480) {
     return canvas;
 }
 
-std::unordered_map<std::string, std::string> Deblurrer::createSyntheticMetadata() {
+// creates random metadata to assign
+std::unordered_map<std::string, std::string> Deblurrer::createTestMetadata() {
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_real_distribution<> altitudeDist(50.0, 150.0);       // meters
     std::uniform_real_distribution<> focalLengthDist(2.0, 5.0);       // mm
-    std::uniform_real_distribution<> speedDist(3.0, 15.0);            // m/s
+    std::uniform_real_distribution<> speedDist(5.0, 20.0);            // km/h
     std::uniform_real_distribution<> yawDist(0.0, 360.0);             // degrees
+    std::uniform_real_distribution<> pitchDist(0.0, 360.0);             // degrees
+    std::uniform_real_distribution<> rollDist(0.0, 360.0);             // degrees
     std::uniform_real_distribution<> exposureDist(1.0 / 100.0, 1.0 / 10.0); // seconds
 
     float altitude = altitudeDist(gen);
     float focalLength = focalLengthDist(gen);
     float speed = speedDist(gen);
     float yaw = yawDist(gen);
+    float pitch = pitchDist(gen);
+    float roll = rollDist(gen);
     float exposure = exposureDist(gen);
 
     std::unordered_map<std::string, std::string> metadata = {
         { "GPS Altitude", std::to_string(altitude) },
+        { "GPS Speed", std::to_string(speed) },
+        { "GPS Speed Ref", "km/h"},
         { "Focal Length", std::to_string(focalLength) },
-        { "FlightSpeed", std::to_string(speed) },
-        { "DroneYaw", std::to_string(yaw) },
+        { "Flight Yaw Degree", std::to_string(yaw) },
+        { "Flight Pitch Degree", std::to_string(pitch) },
+        { "Flight Roll Degree", std::to_string(roll) },
         { "Exposure Time", std::to_string(exposure) }
     };
 
@@ -53,13 +69,77 @@ std::unordered_map<std::string, std::string> Deblurrer::createSyntheticMetadata(
     return metadata;
 }
 
-void Deblurrer::findPSF(int blurLengthPx, float yawDeg, cv::Mat& syntheticPSF) {
+// generates initial and blurred test images
+void Deblurrer::generateTest(const std::string &testOutputPath) {
+    if (!testOutputPath.empty()) {
+        config_.testImagePath = testOutputPath;
+    }
+
+    std::string prefix = "_blurred";
+    std::string blurredImage = constructPathWithPrefix(config_.testImagePath, prefix);
+
+    cv::Mat synthetic = createTestImage();
+    cv::imwrite(config_.testImagePath, synthetic);
+
+    std::unordered_map<std::string, std::string> metadata = createTestMetadata();
+    assignMetadata(config_.testImagePath, metadata);
+
+    blurImage(config_.testImagePath, blurredImage, false);
+}
+
+// blur input image (works for both real and test-generated images)
+void Deblurrer::blurImage(const std::string &inputPath, const std::string &outputImagePath, bool grayscale) {
+    int imreadFlag = grayscale ? cv::IMREAD_GRAYSCALE : cv::IMREAD_COLOR;
+    cv::Mat normal = cv::imread(inputPath, imreadFlag);
+    if (normal.empty()) {
+        std::cerr << "Failed to load image: " << inputPath << "\n";
+        return; 
+    }
+
+    std::unordered_map<std::string, std::string> metadata = extractImageMetadata(inputPath);
+
+    if (config_.overwriteMetadata || (!metadata.count("GPS Speed") || !metadata.count("Flight Yaw Degree"))) {
+        metadata = createTestMetadata();
+        assignMetadata(inputPath, metadata);
+    }
+
+    float yaw = std::stof(metadata["Flight Yaw Degree"]);
+    float speed = parseExifGPSSpeed(metadata["GPS Speed"], metadata["GPS Speed Ref"]);
+    float exposure = parseExifExposureTime(metadata["Exposure Time"]);
+    float gsd = calculateGSD(inputPath); // mm/px
+    float blur = speed * 1000.0f * exposure; // mm
+    int blurLength = static_cast<int>(blur / gsd); // px
+    blurLength = std::max(1, blurLength);
+
+    std::cout << "Original metadata: speed = " << speed << " m/s, yaw = " << yaw << " deg, exposure = " << exposure << " s (" << blurLength << " px blur)" << std::endl;    
+
+    cv::Mat psf;
+    estimatePSF(blurLength, yaw, psf);
+    std::cout << "PSF size: " << psf.cols << "x" << psf.rows << std::endl;
+
+    cv::Mat blurred;
+    filter2D(normal, blurred, -1, psf, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+
+    imwrite(outputImagePath, blurred);
+
+    // reassign all exif tags to new generated image
+    //std::unordered_map<std::string, std::string> customTags; // unused for now
+    copyMetadata(inputPath, outputImagePath);
+
+    std::cout << "Blurred image saved to: " << outputImagePath << "\n";
+}
+
+
+// -------------------- IMAGE DEBLURRING -----------------------
+
+// estimate point spread function (PSF)
+void Deblurrer::estimatePSF(int blurLengthPx, float yawDeg, cv::Mat& psf) {
     if (blurLengthPx < 1) blurLengthPx = 1;
 
     int ksize = std::max(blurLengthPx * 2 + 1, 15);
     if (ksize % 2 == 0) ksize += 1;
 
-    syntheticPSF = cv::Mat::zeros(ksize, ksize, CV_32F);
+    psf = cv::Mat::zeros(ksize, ksize, CV_32F);
     cv::Point2f center(static_cast<float>(ksize) / 2.0f, static_cast<float>(ksize) / 2.0f);
 
     float angleRad = yawDeg * CV_PI / 180.0f;
@@ -71,97 +151,28 @@ void Deblurrer::findPSF(int blurLengthPx, float yawDeg, cv::Mat& syntheticPSF) {
     cv::Point2f pt1(center.x - dx * halfLen, center.y - dy * halfLen);
     cv::Point2f pt2(center.x + dx * halfLen, center.y + dy * halfLen);
 
-    cv::line(syntheticPSF, pt1, pt2, cv::Scalar(1.0f), 1, cv::LINE_AA);
+    cv::line(psf, pt1, pt2, cv::Scalar(1.0f), 1, cv::LINE_AA);
 
     int blurSize = (blurLengthPx > 20) ? 5 : 3;
     float sigma = (blurLengthPx > 20) ? 1.0f : 0.3f;
     if (blurSize % 2 == 0) blurSize += 1;
-    cv::GaussianBlur(syntheticPSF, syntheticPSF, cv::Size(blurSize, blurSize), sigma, sigma);
+    cv::GaussianBlur(psf, psf, cv::Size(blurSize, blurSize), sigma, sigma);
 
-    double sumVal = cv::sum(syntheticPSF)[0];
+    double sumVal = cv::sum(psf)[0];
     if (sumVal <= 0.0) {
         std::cerr << "[ERROR] PSF generation failed — normalization invalid.\n";
-        syntheticPSF.setTo(0);
+        psf.setTo(0);
         return;
     }
-    syntheticPSF /= static_cast<float>(sumVal);
+    psf /= static_cast<float>(sumVal);
 
     cv::Mat psfDebug;
-    cv::normalize(syntheticPSF, psfDebug, 0, 255, cv::NORM_MINMAX);
+    cv::normalize(psf, psfDebug, 0, 255, cv::NORM_MINMAX);
     psfDebug.convertTo(psfDebug, CV_8U);
-    cv::imwrite("debug_psf.png", psfDebug);
+    cv::imwrite("psf.png", psfDebug);
 }
 
-void Deblurrer::blurImage(const std::string &inputPath, const std::string &outputImagePath, bool grayscale) {
-    int imreadFlag = grayscale ? cv::IMREAD_GRAYSCALE : cv::IMREAD_COLOR;
-    cv::Mat normal = cv::imread(inputPath, imreadFlag);
-    if (normal.empty()) {
-        std::cerr << "Failed to load image: " << inputPath << "\n";
-        return; 
-    }
-
-    std::unordered_map<std::string, std::string> metadata = extractImageMetadata(inputPath);
-    if (!metadata.count("FlightSpeed")) {
-        metadata = createSyntheticMetadata();
-        assignMetadata(inputPath, metadata);
-    }
-    float speed = std::stof(metadata["FlightSpeed"]);
-    float yaw = std::stof(metadata["DroneYaw"]);
-    float exposure;
-    std::string exposure_str = metadata["Exposure Time"];
-    size_t slash_pos = exposure_str.find('/');
-
-    // as exposure is usually written as 1/10, 1/1024, etc.
-    if (slash_pos != std::string::npos) {
-        float numerator = std::stof(exposure_str.substr(0, slash_pos));
-        float denominator = std::stof(exposure_str.substr(slash_pos + 1));
-        if (denominator != 0) {
-            exposure = numerator / denominator;
-        } else {
-            std::cerr << "Warning: Exposure Time denominator is zero. Defaulting to 1.0s.\n";
-            exposure = 1.0f;
-        }
-    } else {
-        exposure = std::stof(exposure_str);
-    }
-
-    float gsd = calculateGSD(inputPath); // mm/px
-    float blur = speed * 1000.0f * exposure; // mm
-    int blurLength = static_cast<int>(blur / gsd); // px
-    blurLength = std::max(1, blurLength);
-
-    std::cout << "Original metadata: speed = " << speed << " m/s, yaw = " << yaw << " deg, exposure = " << exposure << " s (" << blurLength << " px blur)" << std::endl;    
-
-    cv::Mat psf;
-    findPSF(blurLength, yaw, psf);
-    std::cout << "PSF size: " << psf.cols << "x" << psf.rows << std::endl;
-
-    cv::Mat blurred;
-    filter2D(normal, blurred, -1, psf, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
-
-    imwrite(outputImagePath, blurred);
-
-    std::unordered_map<std::string, std::string> customTags;
-    customTags["FlightSpeed"] = std::to_string(speed);
-    customTags["DroneYaw"] = std::to_string(yaw);
-    copyMetadata(inputPath, outputImagePath, customTags);
-
-    std::cout << "Blurred image saved to: " << outputImagePath << "\n";
-}
-
-void Deblurrer::createTestImage() {
-    std::string imageSynthetic = "synthetic.jpg";
-    std::string blurredImage = "synthetic_blurred.jpg";
-
-    cv::Mat synthetic = createSyntheticTestImage();
-    cv::imwrite(imageSynthetic, synthetic);
-
-    std::unordered_map<std::string, std::string> metadata = createSyntheticMetadata();
-    assignMetadata(imageSynthetic, metadata);
-
-    blurImage(imageSynthetic, blurredImage, false);
-}
-
+// calculate ground sample distance (GSD)
 float Deblurrer::calculateGSD(const std::string& imagePath) {
     std::unordered_map<std::string, std::string> metadata = extractImageMetadata(imagePath);
 
@@ -386,94 +397,33 @@ void Deblurrer::deblurImage(const std::string &inputPath, const std::string &out
     }
 
     auto metadata = extractImageMetadata(inputPath);
-    float speed = std::stof(metadata["FlightSpeed"]);
-    float yaw = std::stof(metadata["DroneYaw"]);
 
-    float exposure; // as exposure is usually 1/10, 1/1024, etc.
-    std::string exposure_str = metadata["Exposure Time"];
-    size_t slash_pos = exposure_str.find('/');
-    if (slash_pos != std::string::npos) {
-        float numerator = std::stof(exposure_str.substr(0, slash_pos));
-        float denominator = std::stof(exposure_str.substr(slash_pos + 1));
-        if (denominator != 0) {
-            exposure = numerator / denominator;
-        } else {
-            std::cerr << "Warning: Exposure Time denominator is zero. Defaulting to 1.0s.\n";
-            exposure = 1.0f;
-        }
-    } else {
-        exposure = std::stof(exposure_str);
-    }
-
+    float yaw = std::stof(metadata["Flight Yaw Degree"]);
+    float speed = parseExifGPSSpeed(metadata["GPS Speed"], metadata["GPS Speed Ref"]);
+    float exposure = parseExifExposureTime(metadata["Exposure Time"]);
     float gsd = calculateGSD(inputPath);
     float blur_mm = speed * 1000.0f * exposure;
-
-    std::cout << "DEBUG: Calculated blur_mm: " << blur_mm << " mm\n";
-
     int blur_px = std::max(1, static_cast<int>(blur_mm / gsd));
 
-    std::cout << "Deblurring with blur length: " << blur_px << " px, yaw: " << yaw << " deg\n";
+    std::cout << "Deblurring with blur length: " << blur_px << " px, yaw: " << yaw << " deg, speed: " << speed << " m/s\n";
 
     cv::Mat psf;
-    findPSF(blur_px, yaw, psf);
+    estimatePSF(blur_px, yaw, psf);
 
     cv::Mat deblurred;
     wienerDeconvolution(blurred, psf, deblurred, snr);
-    //cv::imwrite("temp_deblurred.jpg", deblurred); // needed only if denoising + other stuff
 
-    // if (!deblurred.empty()) {
-    //     std::cout << "[Info] Applying post-deconvolution denoising.\n";
-    //     denoiseImage(deblurred);
-
-    //     // float gamma = 0.7f;
-    //     // recoverBrightness(deblurred, gamma);
-    // } else {
-    //     std::cerr << "[Warning] Output image is empty. Skipping denoising and recovery step.\n";
-    // }
+    if (config_.denoise) {
+        cv::imwrite("orig_deblurred.jpg", deblurred);
+        if (!deblurred.empty()) {
+            std::cout << "[Info] Applying post-deconvolution denoising.\n";
+            denoiseImage(deblurred);
+        } else {
+            std::cerr << "[Warning] Output image is empty. Skipping denoising and recovery step.\n";
+        }
+    }
 
     cv::imwrite(outputImagePath, deblurred);
     copyMetadata(inputPath, outputImagePath);
     std::cout << "Deblurred image saved to: " << outputImagePath << "\n";
 }
-
-int main(int argc, char** argv) {
-    if (argc == 2 && std::strcmp(argv[1], "--generate-test") == 0) { // create synthetic image
-        Deblurrer db;
-        db.createTestImage();
-        return 0;
-    } else if (argc == 3 and std::strcmp(argv[1], "--blur") == 0) { // blur image instead of deblurring (useful for testing)
-        std::string imageToBlur = argv[2];
-
-        std::string imageName = imageToBlur.substr(0, imageToBlur.find('.'));
-        std::string imageExtension = imageToBlur.substr(imageToBlur.find('.'), imageToBlur.size());
-        std::string blurredImage = imageName + "_blurred" + imageExtension;
-
-        Deblurrer deblurrer;
-        deblurrer.blurImage(imageToBlur, blurredImage, false);
-        return 0;
-    } else if (argc == 2) { // deblurring logic
-        std::string blurredImage = argv[1];
-
-        std::string imageName = blurredImage.substr(0, blurredImage.find('.'));
-        std::string imageExtension = blurredImage.substr(blurredImage.find('.'), blurredImage.size());
-        std::string deblurredImage = imageName + "_deblurred" + imageExtension;
-
-        Deblurrer deblurrer;
-        deblurrer.deblurImage(blurredImage, deblurredImage);
-        return 0;
-    } else if (argc == 4 && std::strcmp(argv[2], "--snr") == 0) {
-        std::string blurredImage = argv[1];
-        float snr = std::stof(argv[3]);
-
-        std::string imageName = blurredImage.substr(0, blurredImage.find('.'));
-        std::string imageExtension = blurredImage.substr(blurredImage.find('.'), blurredImage.size());
-        std::string deblurredImage = imageName + "_deblurred" + imageExtension;
-
-        Deblurrer deblurrer;
-        deblurrer.deblurImage(blurredImage, deblurredImage, snr);
-    } else {
-        std::cerr << "Wrong arguments.\n";
-        return 1;
-    }
-}
-
