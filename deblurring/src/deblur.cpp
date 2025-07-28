@@ -36,11 +36,11 @@ std::unordered_map<std::string, std::string> Deblurrer::createTestMetadata() {
     std::mt19937 gen(rd());
     std::uniform_real_distribution<> altitudeDist(50.0, 150.0);       // meters
     std::uniform_real_distribution<> focalLengthDist(2.0, 5.0);       // mm
-    std::uniform_real_distribution<> speedDist(5.0, 20.0);            // km/h
+    std::uniform_real_distribution<> speedDist(15.0, 25.0);            // km/h
     std::uniform_real_distribution<> yawDist(0.0, 360.0);             // degrees
     std::uniform_real_distribution<> pitchDist(0.0, 360.0);             // degrees
     std::uniform_real_distribution<> rollDist(0.0, 360.0);             // degrees
-    std::uniform_real_distribution<> exposureDist(1.0 / 100.0, 1.0 / 10.0); // seconds
+    std::uniform_real_distribution<> exposureDist(1.0 / 10.0, 1.0 / 5.0); // seconds
 
     float altitude = altitudeDist(gen);
     float focalLength = focalLengthDist(gen);
@@ -87,6 +87,43 @@ void Deblurrer::generateTest(const std::string &testOutputPath) {
     blurImage(config_.testImagePath, blurredImage, false);
 }
 
+// checks if image is blurred
+bool Deblurrer::isBlurred(const std::string &inputPath) {
+    cv::Mat image = cv::imread(inputPath);
+
+    if (image.empty()) {
+        std::cerr << "[ERROR] isBlurred: Failed to load image from " << inputPath << "\n";
+        return false;
+    }
+
+    cv::Mat grayImage;
+    if (image.channels() == 3) {
+        cv::cvtColor(image, grayImage, cv::COLOR_BGR2GRAY);
+    } else {
+        grayImage = image.clone();
+    }
+
+    cv::Mat laplacianImage;
+    cv::Laplacian(grayImage, laplacianImage, CV_64F);
+
+    cv::Scalar mean, stdDev;
+    cv::meanStdDev(laplacianImage, mean, stdDev);
+
+    double variance = stdDev.val[0] * stdDev.val[0];
+
+    std::cout << "[Info] Blur detection: Variance of Laplacian for '" << inputPath << "': " << variance << "\n";
+
+    const double BLUR_THRESHOLD = 100.0; // possibly needs to be adjusted
+
+    if (variance < BLUR_THRESHOLD) {
+        std::cout << "[Info] Image is likely blurred.\n";
+        return true;
+    } else {
+        std::cout << "[Info] Image is likely sharp.\n";
+        return false;
+    }
+}
+
 // blur input image (works for both real and test-generated images)
 void Deblurrer::blurImage(const std::string &inputPath, const std::string &outputImagePath, bool grayscale) {
     int imreadFlag = grayscale ? cv::IMREAD_GRAYSCALE : cv::IMREAD_COLOR;
@@ -103,9 +140,21 @@ void Deblurrer::blurImage(const std::string &inputPath, const std::string &outpu
         assignMetadata(inputPath, metadata);
     }
 
-    float yaw = std::stof(metadata["Flight Yaw Degree"]);
-    float speed = parseExifGPSSpeed(metadata["GPS Speed"], metadata["GPS Speed Ref"]);
-    float exposure = parseExifExposureTime(metadata["Exposure Time"]);
+    float yaw, speed, exposure;
+    try {
+        yaw = std::stof(metadata["Flight Yaw Degree"]);
+        speed = parseExifGPSSpeed(metadata["GPS Speed"], metadata["GPS Speed Ref"]);
+        exposure = parseExifExposureTime(metadata["Exposure Time"]);
+    } catch (...) {
+        std::cerr << "[Error] Image lacks essential metadata. Please check these exiftool tags:\n" 
+                << "    - FlightYawDegree\n"
+                << "    - GPSSpeed\n"
+                << "    - GPSSpeedRef\n"
+                << "    - ExposureTime\n"
+                << "    - GPSAltitude\n";
+        return;
+    }
+    
     float gsd = calculateGSD(inputPath); // mm/px
     float blur = speed * 1000.0f * exposure; // mm
     int blurLength = static_cast<int>(blur / gsd); // px
@@ -390,6 +439,13 @@ void Deblurrer::recoverBrightness(cv::Mat& image, float gamma) {
 }
 
 void Deblurrer::deblurImage(const std::string &inputPath, const std::string &outputImagePath, float snr = 500.0) {
+    if (!config_.forceDeblurring) {
+        if (!isBlurred(inputPath)) {
+            std::cout << "[Info] The image " + inputPath + " is normal. Skipping deblurring.\n";
+            return;
+        }
+    }
+
     cv::Mat blurred = cv::imread(inputPath);
     if (blurred.empty()) {
         std::cerr << "Failed to load image: " << inputPath << "\n";
@@ -398,9 +454,21 @@ void Deblurrer::deblurImage(const std::string &inputPath, const std::string &out
 
     auto metadata = extractImageMetadata(inputPath);
 
-    float yaw = std::stof(metadata["Flight Yaw Degree"]);
-    float speed = parseExifGPSSpeed(metadata["GPS Speed"], metadata["GPS Speed Ref"]);
-    float exposure = parseExifExposureTime(metadata["Exposure Time"]);
+    float yaw, speed, exposure;
+    try {
+        yaw = std::stof(metadata["Flight Yaw Degree"]);
+        speed = parseExifGPSSpeed(metadata["GPS Speed"], metadata["GPS Speed Ref"]);
+        exposure = parseExifExposureTime(metadata["Exposure Time"]);
+    } catch (...) {
+        std::cerr << "[Error] Image lacks essential metadata. Please check these exiftool tags:\n" 
+                << "    - FlightYawDegree\n"
+                << "    - GPSSpeed\n"
+                << "    - GPSSpeedRef\n"
+                << "    - ExposureTime\n"
+                << "    - GPSAltitude\n";
+        return;
+    }
+
     float gsd = calculateGSD(inputPath);
     float blur_mm = speed * 1000.0f * exposure;
     int blur_px = std::max(1, static_cast<int>(blur_mm / gsd));

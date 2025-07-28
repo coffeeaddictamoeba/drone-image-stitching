@@ -13,6 +13,7 @@ struct DeblurConfig {
     bool overwriteMetadata = false;
     bool blur = false;
     bool denoise = false;
+    bool forceDeblurring = false;
 };
 
 inline std::string constructPathWithPrefix(std::string &originalPath, std::string &prefix) {

@@ -27,6 +27,7 @@ class Deblurrer {
         void wienerDeconvolution(const cv::Mat& blurred, const cv::Mat& psf, cv::Mat& outputImage, float snr);
         void denoiseImage(cv::Mat& image, float strength, float edgeStrength);
         void recoverBrightness(cv::Mat& image, float gamma);
+        bool isBlurred(const std::string &inputPath);
 
         // for testing purposes
         cv::Mat createTestImage(int width, int height);

@@ -16,6 +16,7 @@ void parseArgs(int argc, char* argv[]) {
         }
         else if (arg == "--overwrite-metadata") config.overwriteMetadata = true;
         else if (arg == "--denoise") config.denoise = true;
+        else if (arg == "--force") config.forceDeblurring = true;
         else if (arg == "--snr" && i + 1 < argc)
             config.snr = std::stof(argv[++i]);
         else {
