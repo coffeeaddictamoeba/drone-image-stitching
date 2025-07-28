@@ -1,6 +1,7 @@
 #ifndef METADATA_H
 #define METADATA_H
 
+#include <iostream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -11,6 +12,6 @@ void copyMetadata(const std::string& sourceImagePath, const std::string& destIma
 void assignMetadata(const std::string& imagePath, const std::unordered_map<std::string, std::string>& tags);
 
 // parsing operations
-float parseExifExposureTime(std::string &exposure_str);
-float parseExifGPSSpeed(std::string &gpsspeed_str, std::string &gpsspeedref_str);
+float parseExifExposureTime(const std::string &exposure_str);
+float parseExifGPSSpeed(const std::string &gpsspeed_str, const std::string &gpsspeedref_str);
 #endif

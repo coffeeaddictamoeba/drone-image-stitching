@@ -1,6 +1,5 @@
 #include "../include/batchproc.h"
 #include <thread>
-#include <unistd.h>
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -81,17 +80,33 @@ int BatchProcessor::runCommand(const std::string& cmd) {
 }
 
 bool BatchProcessor::runOdmBatchInternal(const fs::path& batch_path) {
-    std::string uid = std::to_string(getuid());
-    std::string gid = std::to_string(getgid());
+    #ifdef _WIN32
+        std::string abs_path = fs::absolute(batch_path).string();
 
-    std::string abs_path = fs::absolute(batch_path).string();
-    std::string cmd = "docker run --rm "
-                  "--user " + uid + ":" + gid + " "
-                  "-v \"" + abs_path + ":/datasets/project\" "
-                  "-w /datasets/project "
-                  "opendronemap/odm "
-                  "--project-path /datasets project "
-                  "--fast-orthophoto --skip-3dmodel";
+        std::string docker_host_path = abs_path;
+        std::replace(docker_host_path.begin(), docker_host_path.end(), '\\', '/');
+
+        std::string cmd = "docker run --rm "
+                        "-v \"" + docker_host_path + ":/datasets/project\" "
+                        "-w /datasets/project "
+                        "opendronemap/odm "
+                        "--project-path /datasets project "
+                        "--fast-orthophoto --skip-3dmodel";
+    #else
+        #include <unistd.h>
+
+        std::string uid = std::to_string(getuid());
+        std::string gid = std::to_string(getgid());
+
+        std::string abs_path = fs::absolute(batch_path).string();
+        std::string cmd = "docker run --rm "
+                    "--user " + uid + ":" + gid + " "
+                    "-v \"" + abs_path + ":/datasets/project\" "
+                    "-w /datasets/project "
+                    "opendronemap/odm "
+                    "--project-path /datasets project "
+                    "--fast-orthophoto --skip-3dmodel";
+    #endif
     return runCommand(cmd) == 0;
 }
 

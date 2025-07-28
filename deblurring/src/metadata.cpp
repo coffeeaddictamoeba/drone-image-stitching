@@ -1,13 +1,42 @@
-#include "../include/metadata.h"
-#include <cstring>
 #include <iostream>
 #include <regex>
 #include <sstream>
-#include <cstdio>
 #include <unordered_map>
+#include <vector>
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
+
+#ifdef _WIN32
+#define popen _popen
+#define pclose _pclose
+#endif
+
+bool isExifToolAvailable() {
+#ifdef _WIN32
+    const char* cmd = "where exiftool >nul 2>&1";
+#else
+    const char* cmd = "command -v exiftool >/dev/null 2>&1";
+#endif
+    return (system(cmd) == 0);
+}
+
+int runExifToolCommand(const std::string& cmd) {
+#ifdef _WIN32
+    std::string fullCmd = cmd + " >nul 2>&1";
+#else
+    std::string fullCmd = cmd + " >/dev/null 2>&1";
+#endif
+    return system(fullCmd.c_str());
+}
 
 std::unordered_map<std::string, std::string> extractImageMetadata(const std::string& imagePath) {
     std::unordered_map<std::string, std::string> metadata;
+    if (!isExifToolAvailable()) {
+        std::cerr << "ExifTool not found in PATH.\n";
+        return metadata;
+    }
+
     std::string cmd = "exiftool \"" + imagePath + "\"";
     FILE* pipe = popen(cmd.c_str(), "r");
     if (!pipe) {
@@ -28,12 +57,8 @@ std::unordered_map<std::string, std::string> extractImageMetadata(const std::str
 
             if (key == "User Comment") {
                 std::regex innerRegex(R"(([^=,]+)=([^=,]+))");
-                auto words_begin = std::sregex_iterator(value.begin(), value.end(), innerRegex);
-                auto words_end = std::sregex_iterator();
-                for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
-                    std::string innerKey = (*i)[1].str();
-                    std::string innerVal = (*i)[2].str();
-                    metadata[innerKey] = innerVal;
+                for (auto it = std::sregex_iterator(value.begin(), value.end(), innerRegex); it != std::sregex_iterator(); ++it) {
+                    metadata[(*it)[1].str()] = (*it)[2].str();
                 }
             }
         }
@@ -43,6 +68,11 @@ std::unordered_map<std::string, std::string> extractImageMetadata(const std::str
 }
 
 void copyMetadata(const std::string& sourceImagePath, const std::string& destImagePath, const std::unordered_map<std::string, std::string>& customTags) {
+    if (!isExifToolAvailable()) {
+        std::cerr << "ExifTool not found.\n";
+        return;
+    }
+
     std::ostringstream cmdStream;
     cmdStream << "exiftool -overwrite_original -tagsFromFile \"" << sourceImagePath << "\"";
 
@@ -50,8 +80,7 @@ void copyMetadata(const std::string& sourceImagePath, const std::string& destIma
         "-CameraModelName", "-Make", "-Software", "-ModifyDate", "-ExposureTime", "-ISO",
         "-DateTimeOriginal", "-CreateDate", "-FocalLength",
         "-GPSVersionID", "-GPSLatitude", "-GPSLongitude", "-GPSAltitude", "-GPSImgDirection",
-        "-GPSSpeed", "-GPSSpeedRef", "-FlightPitchDegree", "-FlightYawDegree", 
-        "-FlightRollDegree"
+        "-GPSSpeed", "-GPSSpeedRef", "-FlightPitchDegree", "-FlightYawDegree", "-FlightRollDegree"
     };
 
     for (const auto& tag : tagsToCopy) {
@@ -61,26 +90,26 @@ void copyMetadata(const std::string& sourceImagePath, const std::string& destIma
     if (!customTags.empty()) {
         cmdStream << " -UserComment=\"";
         bool first = true;
-        for (const auto& pair : customTags) {
-            if (!first) {
-                cmdStream << ",";
-            }
-            cmdStream << pair.first << "=" << pair.second;
+        for (const auto& [key, value] : customTags) {
+            if (!first) cmdStream << ",";
+            cmdStream << key << "=" << value;
             first = false;
         }
         cmdStream << "\"";
     }
 
     cmdStream << " \"" << destImagePath << "\"";
-
-    std::string cmd = cmdStream.str();
-    int result = system(cmd.c_str());
-    if (result != 0) {
-        std::cerr << "ExifTool command failed with exit code " << result << ": " << cmd << "\n";
+    if (runExifToolCommand(cmdStream.str()) != 0) {
+        std::cerr << "Failed to copy metadata with ExifTool.\n";
     }
 }
 
 void assignMetadata(const std::string& imagePath, const std::unordered_map<std::string, std::string>& tags) {
+    if (!isExifToolAvailable()) {
+        std::cerr << "ExifTool not found.\n";
+        return;
+    }
+
     std::ostringstream cmdStream;
     cmdStream << "exiftool -overwrite_original";
 
@@ -92,18 +121,14 @@ void assignMetadata(const std::string& imagePath, const std::unordered_map<std::
     };
 
     std::vector<std::string> userCommentParts;
-
     for (const auto& [key, value] : tags) {
-        std::string normalizedKey = key;
         std::string strippedKey;
-        for (char ch : key) {
-            if (ch != ' ') strippedKey += ch;
-        }
+        for (char ch : key) if (ch != ' ') strippedKey += ch;
 
         if (std::find(standardTags.begin(), standardTags.end(), strippedKey) != standardTags.end()) {
             cmdStream << " -" << strippedKey << "=\"" << value << "\"";
         } else {
-            userCommentParts.push_back(key + "=" + value);
+            userCommentParts.emplace_back(key + "=" + value);
         }
     }
 
@@ -118,42 +143,32 @@ void assignMetadata(const std::string& imagePath, const std::unordered_map<std::
 
     cmdStream << " \"" << imagePath << "\"";
 
-    std::string cmd = cmdStream.str();
-    int result = system(cmd.c_str());
-    if (result != 0) {
-        std::cerr << "Failed to assign metadata. Command:\n" << cmd << "\nExit code: " << result << "\n";
+    if (runExifToolCommand(cmdStream.str()) != 0) {
+        std::cerr << "Failed to assign metadata.\n";
     }
 }
 
-// needed as exposure is usually written as 1/10, 1/1024, etc.
-float parseExifExposureTime(std::string &exposure_str) {
-    float exposure = 0.0;;
+float parseExifExposureTime(const std::string &exposure_str) {
+    float exposure = 0.0f;
     size_t slash_pos = exposure_str.find('/');
     if (slash_pos != std::string::npos) {
         float numerator = std::stof(exposure_str.substr(0, slash_pos));
         float denominator = std::stof(exposure_str.substr(slash_pos + 1));
-        if (denominator != 0) {
-            exposure = numerator / denominator;
-        } else {
-            std::cerr << "Warning: Exposure Time denominator is zero. Defaulting to 1.0s.\n";
-            exposure = 1.0f;
-        }
+        exposure = (denominator != 0) ? numerator / denominator : 1.0f;
     } else {
         exposure = std::stof(exposure_str);
     }
     return exposure;
 }
 
-// returns gps speed in m/s
-float parseExifGPSSpeed(std::string &gpsspeed_str, std::string &gpsspeedref_str) {
+float parseExifGPSSpeed(const std::string &gpsspeed_str, const std::string &gpsspeedref_str) {
     float speed = std::stof(gpsspeed_str);
-    if (std::strcmp(gpsspeedref_str.c_str(), "km/h") == 0) {
-        speed = speed * 1000 / 3600; // km/h -> m/s
-    } else if (std::strcmp(gpsspeedref_str.c_str(), "mph") == 0) {
-        speed = static_cast<float>(speed * 1609.34 / 3600); // mph -> m/s
+    if (gpsspeedref_str == "km/h") {
+        return speed * 1000.0f / 3600.0f;
+    } else if (gpsspeedref_str == "mph") {
+        return speed * 1609.34f / 3600.0f;
     } else {
-        std::cout << "[Warn] Using direct result of GPS Speed (Required units: m/s): " << speed << "\n";
-        return speed; // assuming that m/s requirement is satisfied
+        std::cout << "[Warn] GPS speed assumed in m/s: " << speed << "\n";
+        return speed;
     }
-    return speed;
 }
