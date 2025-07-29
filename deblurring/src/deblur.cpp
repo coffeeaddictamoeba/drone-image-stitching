@@ -2,9 +2,12 @@
 #include "../include/helpers.h"
 #include "../include/metadata.h"
 #include <cstring>
+#include <opencv4/opencv2/core/ocl.hpp>
+#include <opencv4/opencv2/imgproc.hpp>
 #include <opencv4/opencv2/core.hpp>
 #include <opencv4/opencv2/imgcodecs.hpp>
-#include <opencv4/opencv2/opencv.hpp>
+#include <opencv4/opencv2/highgui.hpp>
+
 #include <string>
 #include <unordered_map>
 
@@ -222,43 +225,45 @@ float Deblurrer::findBlurLength(const std::string &imagePath) { // px
 
 // estimate point spread function (PSF)
 void Deblurrer::estimatePSF(int blurLengthPx, float yawDeg, cv::Mat& psf) {
-    if (blurLengthPx < 1) blurLengthPx = 1;
-
-    int ksize = std::max(blurLengthPx * 2 + 1, 15);
-    if (ksize % 2 == 0) ksize += 1;
+    blurLengthPx = std::max(1, blurLengthPx);
+    int ksize = std::max(blurLengthPx * 2 + 1, 15) | 1;  // ensure odd
 
     psf = cv::Mat::zeros(ksize, ksize, CV_32F);
-    cv::Point2f center(static_cast<float>(ksize) / 2.0f, static_cast<float>(ksize) / 2.0f);
+    const cv::Point2f center(ksize * 0.5f, ksize * 0.5f);
 
-    float angleRad = yawDeg * CV_PI / 180.0f;
-
+    float angleRad = yawDeg * (CV_PI / 180.0f);
     float dx = std::cos(angleRad);
     float dy = std::sin(angleRad);
+    float halfLen = 0.5f * blurLengthPx;
 
-    float halfLen = blurLengthPx * 0.5f;
     cv::Point2f pt1(center.x - dx * halfLen, center.y - dy * halfLen);
     cv::Point2f pt2(center.x + dx * halfLen, center.y + dy * halfLen);
 
     cv::line(psf, pt1, pt2, cv::Scalar(1.0f), 1, cv::LINE_AA);
 
-    int blurSize = (blurLengthPx > 20) ? 5 : 3;
-    float sigma = (blurLengthPx > 20) ? 1.0f : 0.3f;
-    if (blurSize % 2 == 0) blurSize += 1;
-    cv::GaussianBlur(psf, psf, cv::Size(blurSize, blurSize), sigma, sigma);
+    if (blurLengthPx > 2) {
+        int blurSize = ((blurLengthPx > 20) ? 5 : 3) | 1;
+        float sigma = (blurLengthPx > 20) ? 1.0f : 0.3f;
+        cv::GaussianBlur(psf, psf, cv::Size(blurSize, blurSize), sigma, sigma, cv::BORDER_REPLICATE);
+    }
 
-    double sumVal = cv::sum(psf)[0];
-    if (sumVal <= 0.0) {
+    double normSum = cv::sum(psf)[0];
+    if (normSum <= 1e-6) {
         std::cerr << "[ERROR] PSF generation failed — normalization invalid.\n";
         psf.setTo(0);
         return;
     }
-    psf /= static_cast<float>(sumVal);
 
-    cv::Mat psfDebug;
-    cv::normalize(psf, psfDebug, 0, 255, cv::NORM_MINMAX);
-    psfDebug.convertTo(psfDebug, CV_8U);
-    cv::imwrite("psf.png", psfDebug);
+    psf /= static_cast<float>(normSum);
 
+    #ifdef DEBUG
+        cv::Mat debug;
+        cv::normalize(psf, debug, 0, 255, cv::NORM_MINMAX);
+        debug.convertTo(debug, CV_8U);
+        cv::imwrite("psf.png", debug);
+    #endif
+
+    // Optional: remove for release
     std::cout << "PSF size: " << psf.cols << "x" << psf.rows << std::endl;
 }
 
@@ -312,16 +317,20 @@ void Deblurrer::fftShift(cv::Mat& input) {
     q1.copyTo(tmp);  q2.copyTo(q1);  tmp.copyTo(q2);
 }
 
-void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv::Mat& output, float snr = 300.0f) {
+void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv::Mat& output, float snr) {
     if (input.empty() || psf.empty()) {
         std::cerr << "[ERROR] Input or PSF is empty.\n";
         return;
     }
 
+    // Enable OpenCL (GPU support if available)
+    cv::ocl::setUseOpenCL(true);
+
+    // Normalize input
     cv::Mat inputF;
     input.convertTo(inputF, CV_32F, 1.0 / 255.0);
 
-    // Pad input with reflection to reduce edge artifacts
+    // Pad image
     int padY = psf.rows / 2;
     int padX = psf.cols / 2;
     cv::copyMakeBorder(inputF, inputF, padY, padY, padX, padX, cv::BORDER_REFLECT_101);
@@ -329,104 +338,100 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
     // Normalize PSF
     cv::Mat normPSF;
     psf.convertTo(normPSF, CV_32F);
-    double sumPSF = cv::sum(normPSF)[0];
-    if (sumPSF <= 0.0) {
-        std::cerr << "[ERROR] PSF sum is zero.\n";
-        return;
-    }
-    normPSF /= static_cast<float>(sumPSF);
+    normPSF /= static_cast<float>(cv::sum(normPSF)[0]);
 
-    // Pad PSF to match padded input size
-    cv::Mat paddedPSF = cv::Mat::zeros(inputF.rows, inputF.cols, CV_32F);
+    // Center PSF in padded matrix
+    cv::Mat paddedPSF = cv::Mat::zeros(inputF.size(), CV_32F);
     int x = (paddedPSF.cols - normPSF.cols) / 2;
     int y = (paddedPSF.rows - normPSF.rows) / 2;
     normPSF.copyTo(paddedPSF(cv::Rect(x, y, normPSF.cols, normPSF.rows)));
-    fftShift(paddedPSF);  // Shift PSF center
+    fftShift(paddedPSF); // Custom function to shift PSF center to corners
 
-    // DFT of PSF
+    // FFT of PSF
     cv::Mat psfDFT;
     cv::dft(paddedPSF, psfDFT, cv::DFT_COMPLEX_OUTPUT);
 
-    // Split image into channels
-    std::vector<cv::Mat> channels;
-    if (inputF.channels() == 1) {
-        channels.push_back(inputF);
-    } else {
-        cv::split(inputF, channels);
-    }
+    // Precompute conjugate and |H|^2 + 1/SNR
+    std::vector<cv::Mat> psfPlanes(2);
+    cv::split(psfDFT, psfPlanes);
+    cv::Mat psfMag2;
+    cv::magnitude(psfPlanes[0], psfPlanes[1], psfMag2);
+    psfMag2 = psfMag2.mul(psfMag2) + (1.0f / snr) + 1e-6f;
 
-    std::vector<cv::Mat> resultChannels;
-    for (auto& ch : channels) {
-        cv::Mat hann = createHannWindow2D(ch.rows, ch.cols);
-        cv::Mat chWindowed = ch.mul(hann);
+    // Compute conjugate
+    psfPlanes[1] *= -1;
+    cv::Mat psfConj;
+    cv::merge(psfPlanes, psfConj);
 
-        // Image DFT
-        cv::Mat imgDFT;
-        cv::dft(chWindowed, imgDFT, cv::DFT_COMPLEX_OUTPUT);
+    // Split input into channels
+    std::vector<cv::Mat> inputChannels;
+    if (inputF.channels() == 1)
+        inputChannels.push_back(inputF);
+    else
+        cv::split(inputF, inputChannels);
 
-        // Split PSF
-        std::vector<cv::Mat> psfPlanes(2);
-        cv::split(psfDFT, psfPlanes);
-        cv::Mat psfMag2;
-        cv::magnitude(psfPlanes[0], psfPlanes[1], psfMag2);
-        psfMag2 = psfMag2.mul(psfMag2) + (1.0f / snr);
-        psfMag2 += 1e-6f;
+    // Shared Hann window
+    cv::Mat hann = createHannWindow2D(inputF.rows, inputF.cols); // Custom function
 
-        // Conjugate PSF
-        psfPlanes[1] *= -1;
-        cv::Mat psfConj;
-        cv::merge(psfPlanes, psfConj);
+    // Shared feathering mask
+    cv::Mat mask(input.size(), CV_32F, 1.0f);
+    int feather = std::min(30, std::min(input.cols, input.rows) / 10);
+    cv::rectangle(mask, cv::Rect(0, 0, input.cols, feather), 0.0f, -1);
+    cv::rectangle(mask, cv::Rect(0, input.rows - feather, input.cols, feather), 0.0f, -1);
+    cv::rectangle(mask, cv::Rect(0, 0, feather, input.rows), 0.0f, -1);
+    cv::rectangle(mask, cv::Rect(input.cols - feather, 0, feather, input.rows), 0.0f, -1);
+    cv::GaussianBlur(mask, mask, cv::Size(2 * feather + 1, 2 * feather + 1), feather);
 
-        // Multiply image and PSF in frequency domain
-        std::vector<cv::Mat> imgPlanes(2);
-        cv::split(imgDFT, imgPlanes);
-        cv::Mat real = imgPlanes[0].mul(psfPlanes[0]) - imgPlanes[1].mul(psfPlanes[1]);
-        cv::Mat imag = imgPlanes[0].mul(psfPlanes[1]) + imgPlanes[1].mul(psfPlanes[0]);
+    // Output container
+    std::vector<cv::Mat> outputChannels(inputChannels.size());
 
-        real /= psfMag2;
-        imag /= psfMag2;
+    // Parallel deconvolution
+    cv::parallel_for_(cv::Range(0, static_cast<int>(inputChannels.size())), [&](const cv::Range& range) {
+        for (int i = range.start; i < range.end; ++i) {
+            cv::Mat chWin = inputChannels[i].mul(hann);
 
-        cv::Mat wienerDFT;
-        cv::merge(std::vector<cv::Mat>{ real, imag }, wienerDFT);
+            cv::Mat imgDFT;
+            cv::dft(chWin, imgDFT, cv::DFT_COMPLEX_OUTPUT);
 
-        // Inverse DFT
-        cv::Mat restored;
-        cv::idft(wienerDFT, restored, cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
+            // Multiply in frequency domain: imgDFT * psfConj
+            cv::Mat filtered;
+            cv::mulSpectrums(imgDFT, psfConj, filtered, 0);
 
-        // Avoid division by small Hann values
-        cv::Mat safeHann = hann + 1e-4f;
-        restored = restored / safeHann;
+            // Divide by Wiener denominator (magnitude squared + 1/SNR)
+            std::vector<cv::Mat> fPlanes(2);
+            cv::split(filtered, fPlanes);
+            fPlanes[0] /= psfMag2;
+            fPlanes[1] /= psfMag2;
+            cv::merge(fPlanes, filtered);
 
-        // Crop to original size
-        restored = restored(cv::Rect(padX, padY, input.cols, input.rows));
-        cv::Mat origCropped = ch(cv::Rect(padX, padY, input.cols, input.rows));
+            // Inverse DFT
+            cv::Mat restored;
+            cv::idft(filtered, restored, cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
 
-        // Feather noisy corners using Gaussian mask
-        cv::Mat mask = cv::Mat::ones(restored.size(), CV_32F);
-        int feather = std::min(30, std::min(input.cols, input.rows) / 10);
-        cv::rectangle(mask, cv::Rect(0, 0, input.cols, feather), 0.0f, -1);
-        cv::rectangle(mask, cv::Rect(0, input.rows - feather, input.cols, feather), 0.0f, -1);
-        cv::rectangle(mask, cv::Rect(0, 0, feather, input.rows), 0.0f, -1);
-        cv::rectangle(mask, cv::Rect(input.cols - feather, 0, feather, input.rows), 0.0f, -1);
-        cv::GaussianBlur(mask, mask, cv::Size(2 * feather + 1, 2 * feather + 1), feather);
+            // Undo Hann
+            restored /= hann + 1e-4f;
 
-        // Blend with original input to suppress noise in corners
-        restored = restored.mul(mask) + origCropped.mul(1.0f - mask);
+            // Crop and feather blend
+            restored = restored(cv::Rect(padX, padY, input.cols, input.rows));
+            cv::Mat origCrop = inputChannels[i](cv::Rect(padX, padY, input.cols, input.rows));
+            restored = restored.mul(mask) + origCrop.mul(1.0f - mask);
 
-        // Clamp
-        cv::threshold(restored, restored, 1.0, 1.0, cv::THRESH_TRUNC);
-        cv::threshold(restored, restored, 0.0, 0.0, cv::THRESH_TOZERO);
+            // Clamp to [0, 1]
+            cv::min(restored, 1.0f, restored);
+            cv::max(restored, 0.0f, restored);
 
-        resultChannels.push_back(restored);
-    }
+            outputChannels[i] = restored;
+        }
+    });
 
-    cv::Mat resultF;
-    if (resultChannels.size() == 1) {
-        resultF = resultChannels[0];
-    } else {
-        cv::merge(resultChannels, resultF);
-    }
-    resultF.convertTo(output, CV_8U, 255.0);
+    // Merge channels and convert
+    cv::Mat merged;
+    if (outputChannels.size() == 1)
+        merged = outputChannels[0];
+    else
+        cv::merge(outputChannels, merged);
+
+    merged.convertTo(output, CV_8U, 255.0);
 }
 
 // doesn't work as expected, needs refactoring

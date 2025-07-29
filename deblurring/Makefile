@@ -63,7 +63,7 @@ else
     endif
 
     OPENCV_INCLUDE := $(OPENCV_ROOT)/build/include
-    OPENCV_LIB_DIR := $(OPCV_ROOT)/build/x64/vc15/lib # Common path for VS 2017/2019/2022
+    OPENCV_LIB_DIR := $(OPENCV_ROOT)/build/x64/vc15/lib
     ifeq ($(wildcard $(OPENCV_LIB_DIR)),) # Check if the default x64/vc15/lib exists
         OPENCV_LIB_DIR := $(OPENCV_ROOT)/build/x64/vc14/lib # For VS 2015
         ifeq ($(wildcard $(OPENCV_LIB_DIR)),)
