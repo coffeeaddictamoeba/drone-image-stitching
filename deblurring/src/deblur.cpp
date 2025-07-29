@@ -1,4 +1,5 @@
 #include "../include/deblur.h"
+#include "../include/helpers.h"
 #include "../include/metadata.h"
 #include <cstring>
 #include <opencv4/opencv2/core.hpp>
@@ -87,12 +88,40 @@ void Deblurrer::generateTest(const std::string &testOutputPath) {
     blurImage(config_.testImagePath, blurredImage, false);
 }
 
-// checks if image is blurred
-bool Deblurrer::isBlurred(const std::string &inputPath) {
-    cv::Mat image = cv::imread(inputPath);
+// checks if image is blurred (by image matrix)
+bool Deblurrer::isBlurred(const cv::Mat &image, float blurThreshold = 100.0f) {
+    cv::Mat grayImage;
+    if (image.channels() == 3) {
+        cv::cvtColor(image, grayImage, cv::COLOR_BGR2GRAY);
+    } else {
+        grayImage = image.clone();
+    }
+
+    cv::Mat laplacianImage;
+    cv::Laplacian(grayImage, laplacianImage, CV_64F);
+
+    cv::Scalar mean, stdDev;
+    cv::meanStdDev(laplacianImage, mean, stdDev);
+
+    double variance = stdDev.val[0] * stdDev.val[0];
+
+    std::cout << "[Info] Blur detection: Variance of Laplacian estimated: " << variance << "\n";
+
+    if (variance < blurThreshold) {
+        std::cout << "[Info] Image is likely blurred.\n";
+        return true;
+    } else {
+        std::cout << "[Info] Image is likely sharp.\n";
+        return false;
+    }
+}
+
+// checks if image is blurred (by image path)
+bool Deblurrer::isBlurred(const std::string &imagePath, float blurThreshold = 100.0f) {
+    cv::Mat image = cv::imread(imagePath);
 
     if (image.empty()) {
-        std::cerr << "[ERROR] isBlurred: Failed to load image from " << inputPath << "\n";
+        std::cerr << "[ERROR] isBlurred: Failed to load image from " << imagePath << "\n";
         return false;
     }
 
@@ -111,11 +140,9 @@ bool Deblurrer::isBlurred(const std::string &inputPath) {
 
     double variance = stdDev.val[0] * stdDev.val[0];
 
-    std::cout << "[Info] Blur detection: Variance of Laplacian for '" << inputPath << "': " << variance << "\n";
+    std::cout << "[Info] Blur detection: Variance of Laplacian estimated: " << variance << "\n";
 
-    const double BLUR_THRESHOLD = 100.0; // possibly needs to be adjusted
-
-    if (variance < BLUR_THRESHOLD) {
+    if (variance < blurThreshold) {
         std::cout << "[Info] Image is likely blurred.\n";
         return true;
     } else {
@@ -125,24 +152,48 @@ bool Deblurrer::isBlurred(const std::string &inputPath) {
 }
 
 // blur input image (works for both real and test-generated images)
-void Deblurrer::blurImage(const std::string &inputPath, const std::string &outputImagePath, bool grayscale) {
+void Deblurrer::blurImage(const std::string &inputImagePath, const std::string &outputImagePath, bool grayscale) {
     int imreadFlag = grayscale ? cv::IMREAD_GRAYSCALE : cv::IMREAD_COLOR;
-    cv::Mat normal = cv::imread(inputPath, imreadFlag);
+    cv::Mat normal = cv::imread(inputImagePath, imreadFlag);
     if (normal.empty()) {
-        std::cerr << "Failed to load image: " << inputPath << "\n";
+        std::cerr << "Failed to load image: " << inputImagePath << "\n";
         return; 
     }
 
-    std::unordered_map<std::string, std::string> metadata = extractImageMetadata(inputPath);
+    float blurLength = findBlurLength(inputImagePath);
+    float yaw = std::stof(extractExifTagValue(inputImagePath, "FlightYawDegree"));
 
-    if (config_.overwriteMetadata || (!metadata.count("GPS Speed") || !metadata.count("Flight Yaw Degree"))) {
+    cv::Mat psf;
+    estimatePSF(blurLength, yaw, psf);
+
+    cv::Mat blurred;
+    filter2D(normal, blurred, -1, psf, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+
+    imwrite(outputImagePath, blurred);
+    copyMetadata(inputImagePath, outputImagePath);
+
+    std::cout << "Blurred image saved to: " << outputImagePath << "\n";
+}
+
+
+// -------------------- IMAGE DEBLURRING -----------------------
+
+// finds blur length by image metadata
+float Deblurrer::findBlurLength(const std::string &imagePath) { // px
+    auto metadata = extractImageMetadata(imagePath);
+
+    // suitable for tests or synthetic blurring, not recommended to use otherwise
+    if (config_.overwriteMetadata) {
         metadata = createTestMetadata();
-        assignMetadata(inputPath, metadata);
+        assignMetadata(imagePath, metadata);
     }
 
     float yaw, speed, exposure;
     try {
-        yaw = std::stof(metadata["Flight Yaw Degree"]);
+        yaw = metadata.count("Flight Yaw Degree") ? std::stof(metadata["Flight Yaw Degree"]) : 0.0f;
+        if (yaw == 0.0f) {
+            std::cout << "[Warn] Yaw of " << yaw << " was detected. This can be an indicator of empty yaw metadata.\n";
+        }
         speed = parseExifGPSSpeed(metadata["GPS Speed"], metadata["GPS Speed Ref"]);
         exposure = parseExifExposureTime(metadata["Exposure Time"]);
     } catch (...) {
@@ -152,34 +203,22 @@ void Deblurrer::blurImage(const std::string &inputPath, const std::string &outpu
                 << "    - GPSSpeedRef\n"
                 << "    - ExposureTime\n"
                 << "    - GPSAltitude\n";
-        return;
+        return 0.0f;
     }
-    
-    float gsd = calculateGSD(inputPath); // mm/px
+
+    float alt = std::stof(metadata["GPS Altitude"]); // m
+    float flen = std::stof(metadata["Focal Length"]); // mm
+    int imageWidth = std::stoi(metadata["Image Width"]); // px
+    int imageHeight = std::stoi(metadata["Image Height"]); // px
+
+    float gsd = calculateGSD(alt, flen, imageWidth, imageHeight, config_.sensorWidth, config_.sensorHeight); // mm/px
     float blur = speed * 1000.0f * exposure; // mm
     int blurLength = static_cast<int>(blur / gsd); // px
-    blurLength = std::max(1, blurLength);
 
-    std::cout << "Original metadata: speed = " << speed << " m/s, yaw = " << yaw << " deg, exposure = " << exposure << " s (" << blurLength << " px blur)" << std::endl;    
+    std::cout << "Original metadata: speed = " << speed << " m/s, yaw = " << yaw << " deg, exposure = " << exposure << " s (" << blurLength << " px blur)" << std::endl; 
 
-    cv::Mat psf;
-    estimatePSF(blurLength, yaw, psf);
-    std::cout << "PSF size: " << psf.cols << "x" << psf.rows << std::endl;
-
-    cv::Mat blurred;
-    filter2D(normal, blurred, -1, psf, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
-
-    imwrite(outputImagePath, blurred);
-
-    // reassign all exif tags to new generated image
-    //std::unordered_map<std::string, std::string> customTags; // unused for now
-    copyMetadata(inputPath, outputImagePath);
-
-    std::cout << "Blurred image saved to: " << outputImagePath << "\n";
+    return std::max(1, blurLength); // px
 }
-
-
-// -------------------- IMAGE DEBLURRING -----------------------
 
 // estimate point spread function (PSF)
 void Deblurrer::estimatePSF(int blurLengthPx, float yawDeg, cv::Mat& psf) {
@@ -219,33 +258,24 @@ void Deblurrer::estimatePSF(int blurLengthPx, float yawDeg, cv::Mat& psf) {
     cv::normalize(psf, psfDebug, 0, 255, cv::NORM_MINMAX);
     psfDebug.convertTo(psfDebug, CV_8U);
     cv::imwrite("psf.png", psfDebug);
+
+    std::cout << "PSF size: " << psf.cols << "x" << psf.rows << std::endl;
 }
 
 // calculate ground sample distance (GSD)
-float Deblurrer::calculateGSD(const std::string& imagePath) {
-    std::unordered_map<std::string, std::string> metadata = extractImageMetadata(imagePath);
+float Deblurrer::calculateGSD(float altitude, float focalLength, int imageWidth, int imageHeight, float sensorWidth = 3.68f, float sensorHeight = 2.76f) {
+    altitude *= 1000.0f; // m -> mm
 
-    float alt = std::stof(metadata["GPS Altitude"]); // m
-    float flen = std::stof(metadata["Focal Length"]); // mm
-    float sensorWidth = 3.68f; // mm
-    float sensorHeight = 2.76f; // mm
-
-    cv::Mat img = cv::imread(imagePath, cv::IMREAD_UNCHANGED);
-    int imageWidth = img.cols; // px
-    int imageHeight = img.rows; // px
-
-    alt *= 1000.0f; // m -> mm
-
-    float gsdWidth = (alt * sensorWidth) / (flen * imageWidth); // mm/px
-    float gsdHeight = (alt * sensorHeight) / (flen * imageHeight); // mm/px
+    float gsdWidth = (altitude * sensorWidth) / (focalLength * imageWidth); // mm/px
+    float gsdHeight = (altitude * sensorHeight) / (focalLength * imageHeight); // mm/px
 
     float gsd = std::max(gsdWidth, gsdHeight); // mm/px
 
-    std::cout << "GSD: Calculated GSD = " << gsd<< " mm/px\n";
-    std::cout << "  Focal Length: " << flen << " mm\n";
+    std::cout << "GSD: Calculated GSD = " << gsd << " mm/px\n";
+    std::cout << "  Focal Length: " << focalLength << " mm\n";
     std::cout << "  Sensor Size: " << sensorWidth << "x" << sensorHeight << " mm\n";
     std::cout << "  Image Resolution: " << imageWidth << "x" << imageHeight << " px\n";
-    std::cout << "  Altitude: " << alt << " mm\n";
+    std::cout << "  Altitude: " << altitude << " mm\n";
 
     return gsd;
 }
@@ -288,7 +318,6 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
         return;
     }
 
-    // Convert to float32
     cv::Mat inputF;
     input.convertTo(inputF, CV_32F, 1.0 / 255.0);
 
@@ -401,7 +430,7 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
 }
 
 // doesn't work as expected, needs refactoring
-void Deblurrer::denoiseImage(cv::Mat& image, float strength = 30.0f, float edgeStrength = 0.4f) {
+void Deblurrer::denoiseImage(cv::Mat& image, float strength = 10.0f, float edgeStrength = 0.4f) {
     if (image.empty()) {
         std::cerr << "[Error] Denoise input image is empty.\n";
         return;
@@ -438,60 +467,39 @@ void Deblurrer::recoverBrightness(cv::Mat& image, float gamma) {
     cv::LUT(image, lookUpTable, image);
 }
 
-void Deblurrer::deblurImage(const std::string &inputPath, const std::string &outputImagePath, float snr = 500.0) {
+void Deblurrer::deblurImage(const std::string &inputImagePath, const std::string &outputImagePath, float snr = 500.0) {
+    cv::Mat blurred = cv::imread(inputImagePath);
+    if (blurred.empty()) {
+        std::cerr << "Failed to load image: " << inputImagePath << "\n";
+        return;
+    }
+
     if (!config_.forceDeblurring) {
-        if (!isBlurred(inputPath)) {
-            std::cout << "[Info] The image " + inputPath + " is normal. Skipping deblurring.\n";
+        if (!isBlurred(blurred, config_.blurThreshold)) {
+            std::cout << "[Info] The image " + inputImagePath + " is normal. Skipping deblurring.\n";
             return;
         }
-    }
+    }    
 
-    cv::Mat blurred = cv::imread(inputPath);
-    if (blurred.empty()) {
-        std::cerr << "Failed to load image: " << inputPath << "\n";
-        return;
-    }
-
-    auto metadata = extractImageMetadata(inputPath);
-
-    float yaw, speed, exposure;
-    try {
-        yaw = std::stof(metadata["Flight Yaw Degree"]);
-        speed = parseExifGPSSpeed(metadata["GPS Speed"], metadata["GPS Speed Ref"]);
-        exposure = parseExifExposureTime(metadata["Exposure Time"]);
-    } catch (...) {
-        std::cerr << "[Error] Image lacks essential metadata. Please check these exiftool tags:\n" 
-                << "    - FlightYawDegree\n"
-                << "    - GPSSpeed\n"
-                << "    - GPSSpeedRef\n"
-                << "    - ExposureTime\n"
-                << "    - GPSAltitude\n";
-        return;
-    }
-
-    float gsd = calculateGSD(inputPath);
-    float blur_mm = speed * 1000.0f * exposure;
-    int blur_px = std::max(1, static_cast<int>(blur_mm / gsd));
-
-    std::cout << "Deblurring with blur length: " << blur_px << " px, yaw: " << yaw << " deg, speed: " << speed << " m/s\n";
+    float blurLength = findBlurLength(inputImagePath);
+    float yaw = std::stof(extractExifTagValue(inputImagePath, "FlightYawDegree"));
 
     cv::Mat psf;
-    estimatePSF(blur_px, yaw, psf);
+    estimatePSF(blurLength, yaw, psf);
 
     cv::Mat deblurred;
     wienerDeconvolution(blurred, psf, deblurred, snr);
 
     if (config_.denoise) {
-        cv::imwrite("orig_deblurred.jpg", deblurred);
         if (!deblurred.empty()) {
             std::cout << "[Info] Applying post-deconvolution denoising.\n";
             denoiseImage(deblurred);
         } else {
-            std::cerr << "[Warning] Output image is empty. Skipping denoising and recovery step.\n";
+            std::cerr << "[Warn] Output image is empty. Skipping denoising and recovery step.\n";
         }
     }
 
     cv::imwrite(outputImagePath, deblurred);
-    copyMetadata(inputPath, outputImagePath);
+    copyMetadata(inputImagePath, outputImagePath);
     std::cout << "Deblurred image saved to: " << outputImagePath << "\n";
 }

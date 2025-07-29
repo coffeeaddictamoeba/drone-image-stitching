@@ -6,8 +6,12 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <array>
+#include <memory>
+#include "../include/helpers.h"
 
 #ifdef _WIN32
+#include <process.h>
 #define popen _popen
 #define pclose _pclose
 #endif
@@ -30,6 +34,14 @@ int runExifToolCommand(const std::string& cmd) {
     return system(fullCmd.c_str());
 }
 
+struct PipeCloser {
+    void operator()(FILE* fp) const {
+        if (fp) {
+            pclose(fp);
+        }
+    }
+};
+
 std::unordered_map<std::string, std::string> extractImageMetadata(const std::string& imagePath) {
     std::unordered_map<std::string, std::string> metadata;
     if (!isExifToolAvailable()) {
@@ -38,18 +50,17 @@ std::unordered_map<std::string, std::string> extractImageMetadata(const std::str
     }
 
     std::string cmd = "exiftool \"" + imagePath + "\"";
-    FILE* pipe = popen(cmd.c_str(), "r");
+    std::unique_ptr<FILE, PipeCloser> pipe(popen(cmd.c_str(), "r"));
     if (!pipe) {
-        std::cerr << "Failed to run exiftool.\n";
-        return metadata;
+        throw std::runtime_error("Failed to run exiftool command: " + cmd);
     }
 
-    char buffer[512];
+    std::array<char, 512> buffer;
     std::regex kvRegex(R"(^\s*([^:]+?)\s*:\s*(.*)\s*$)");
     std::smatch match;
 
-    while (fgets(buffer, sizeof(buffer), pipe)) {
-        std::string line(buffer);
+    while (fgets(buffer.data(), buffer.size(), pipe.get())) {
+        std::string line = trim(buffer.data());
         if (std::regex_match(line, match, kvRegex)) {
             std::string key = match[1].str();
             std::string value = match[2].str();
@@ -63,8 +74,34 @@ std::unordered_map<std::string, std::string> extractImageMetadata(const std::str
             }
         }
     }
-    pclose(pipe);
+    pclose(pipe.release());
     return metadata;
+}
+
+std::string extractExifTagValue(const std::string& imagePath, const std::string& tagName) {
+    if (!isExifToolAvailable()) {
+        throw std::runtime_error("ExifTool not found in PATH or not executable.");
+    }
+
+    std::string cmd = "exiftool -" + trim(tagName) + " -s3 -q \"" + imagePath + "\"";
+
+    std::unique_ptr<FILE, PipeCloser> pipe(popen(cmd.c_str(), "r"));
+    if (!pipe) {
+        throw std::runtime_error("Failed to run exiftool command: " + cmd);
+    }
+
+    std::array<char, 512> buffer;
+    std::string value;
+
+    if (fgets(buffer.data(), buffer.size(), pipe.get())) {
+        value = trim(buffer.data());
+    }
+
+    int status = pclose(pipe.release());
+    if (status != 0) {
+        throw std::runtime_error("ExifTool command failed with exit code " + std::to_string(WEXITSTATUS(status)) + " while extracting tag '" + tagName + "' from image: " + imagePath);
+    }
+    return value;
 }
 
 void copyMetadata(const std::string& sourceImagePath, const std::string& destImagePath, const std::unordered_map<std::string, std::string>& customTags) {

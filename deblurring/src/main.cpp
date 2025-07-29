@@ -1,4 +1,5 @@
 #include "../include/deblur.h"
+#include "../include/helpers.h"
 
 DeblurConfig config;
 
@@ -19,6 +20,12 @@ void parseArgs(int argc, char* argv[]) {
         else if (arg == "--force") config.forceDeblurring = true;
         else if (arg == "--snr" && i + 1 < argc)
             config.snr = std::stof(argv[++i]);
+        else if (arg == "--blur-threshold" && i + 1 < argc)
+            config.blurThreshold = std::stof(argv[++i]);
+        else if (arg == "--sensor-width" && i + 1 < argc)
+            config.sensorWidth = std::stof(argv[++i]);
+        else if (arg == "--sensor-height" && i + 1 < argc)
+            config.sensorHeight = std::stof(argv[++i]);
         else {
             continue;
         }

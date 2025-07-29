@@ -9,18 +9,14 @@ struct DeblurConfig {
     std::string originalImagePath = "";
     
     float snr = 500.0;
+    float blurThreshold = 100.0;
+    float sensorWidth = 3.68f;
+    float sensorHeight = 2.76f;
     bool generateTest = false;
     bool overwriteMetadata = false;
     bool blur = false;
     bool denoise = false;
     bool forceDeblurring = false;
 };
-
-inline std::string constructPathWithPrefix(std::string &originalPath, std::string &prefix) {
-    size_t extensionStart = originalPath.find('.');
-    std::string imageName = originalPath.substr(0, extensionStart);
-    std::string imageExtension = originalPath.substr(extensionStart, originalPath.size());
-    return imageName + prefix + imageExtension;
-}
 
 #endif
