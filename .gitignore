@@ -31,11 +31,15 @@
 *.out
 *.app
 
+# build
+bin/
+build/
+
+# stitching
 incoming/
 stitched/
-mosaic_odm
-/batches/
-tiles/
+batches/
+
+# testing
 results/
-bin/
 tests/

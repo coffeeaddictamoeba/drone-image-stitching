@@ -2,12 +2,11 @@
 #include "../include/helpers.h"
 #include "../include/metadata.h"
 #include <cstring>
-#include <opencv4/opencv2/core/ocl.hpp>
-#include <opencv4/opencv2/imgproc.hpp>
-#include <opencv4/opencv2/core.hpp>
-#include <opencv4/opencv2/imgcodecs.hpp>
-#include <opencv4/opencv2/highgui.hpp>
-
+#include <opencv2/core/ocl.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/highgui.hpp>
 #include <string>
 #include <unordered_map>
 
@@ -434,7 +433,6 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
     merged.convertTo(output, CV_8U, 255.0);
 }
 
-// doesn't work as expected, needs refactoring
 void Deblurrer::denoiseImage(cv::Mat& image, float strength = 10.0f, float edgeStrength = 0.4f) {
     if (image.empty()) {
         std::cerr << "[Error] Denoise input image is empty.\n";
