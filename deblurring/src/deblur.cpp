@@ -40,6 +40,9 @@ std::unordered_map<std::string, std::string> Deblurrer::createTestMetadata() {
     std::uniform_real_distribution<> altitudeDist(50.0, 150.0);       // meters
     std::uniform_real_distribution<> focalLengthDist(2.0, 5.0);       // mm
     std::uniform_real_distribution<> speedDist(15.0, 25.0);            // km/h
+    std::uniform_real_distribution<> speedXDist(15.0, 25.0);            // m/s
+    std::uniform_real_distribution<> speedYDist(15.0, 25.0);            // m/s
+    std::uniform_real_distribution<> speedZDist(15.0, 25.0);            // m/s
     std::uniform_real_distribution<> yawDist(0.0, 360.0);             // degrees
     std::uniform_real_distribution<> pitchDist(0.0, 360.0);             // degrees
     std::uniform_real_distribution<> rollDist(0.0, 360.0);             // degrees
@@ -48,6 +51,9 @@ std::unordered_map<std::string, std::string> Deblurrer::createTestMetadata() {
     float altitude = altitudeDist(gen);
     float focalLength = focalLengthDist(gen);
     float speed = speedDist(gen);
+    float speedX = speedXDist(gen);
+    float speedY = speedYDist(gen);
+    float speedZ = speedZDist(gen);
     float yaw = yawDist(gen);
     float pitch = pitchDist(gen);
     float roll = rollDist(gen);
@@ -57,6 +63,9 @@ std::unordered_map<std::string, std::string> Deblurrer::createTestMetadata() {
         { "GPS Altitude", std::to_string(altitude) },
         { "GPS Speed", std::to_string(speed) },
         { "GPS Speed Ref", "km/h"},
+        { "XMP-drone-dji:Flight X Speed", std::to_string(speedX) },
+        { "XMP-drone-dji:Flight Y Speed", std::to_string(speedY) },
+        { "XMP-drone-dji:Flight Z Speed", std::to_string(speedZ) },
         { "Focal Length", std::to_string(focalLength) },
         { "Flight Yaw Degree", std::to_string(yaw) },
         { "Flight Pitch Degree", std::to_string(pitch) },
@@ -162,11 +171,11 @@ void Deblurrer::blurImage(const std::string &inputImagePath, const std::string &
         return; 
     }
 
-    float blurLength = findBlurLength(inputImagePath);
-    float yaw = std::stof(extractExifTagValue(inputImagePath, "FlightYawDegree"));
+    float blurAngleRad;
+    float blurLength = findBlurLength(inputImagePath, blurAngleRad);
 
     cv::Mat psf;
-    estimatePSF(blurLength, yaw, psf);
+    estimatePSF(blurLength, blurAngleRad, psf);
 
     cv::Mat blurred;
     filter2D(normal, blurred, -1, psf, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
@@ -181,58 +190,138 @@ void Deblurrer::blurImage(const std::string &inputImagePath, const std::string &
 // -------------------- IMAGE DEBLURRING -----------------------
 
 // finds blur length by image metadata
-float Deblurrer::findBlurLength(const std::string &imagePath) { // px
-    auto metadata = extractImageMetadata(imagePath);
-
+float Deblurrer::findBlurLength(const std::string &imagePath, float &blurAngleRad) { // px
     // suitable for tests or synthetic blurring, not recommended to use otherwise
     if (config_.overwriteMetadata) {
-        metadata = createTestMetadata();
+        auto metadata = createTestMetadata();
         assignMetadata(imagePath, metadata);
     }
 
-    float yaw, speed, exposure;
+    auto metadata = extractImageMetadata(imagePath);
+
+    bool use3DSpeed = false;
+    float yaw, pitch, roll, speed, speedX, speedY, speedZ, exposure;
+    
+    float yawRad = 0.0f;
+    float pitchRad = 0.0f;
+    float rollRad = 0.0f;
+
     try {
-        yaw = metadata.count("Flight Yaw Degree") ? std::stof(metadata["Flight Yaw Degree"]) : 0.0f;
-        if (yaw == 0.0f) {
-            std::cout << "[Warn] Yaw of " << yaw << " was detected. This can be an indicator of empty yaw metadata.\n";
+        yaw = metadata.count("Flight Yaw Degree") ? std::stof(metadata["Flight Yaw Degree"]) : 0.0f; // degrees
+        pitch = metadata.count("Flight Pitch Degree") ? std::stof(metadata["Flight Pitch Degree"]) : 0.0f; // degrees
+        roll = metadata.count("Flight Roll Degree") ? std::stof(metadata["Flight Roll Degree"]) : 0.0f; // degrees
+
+        yawRad = yaw * (CV_PI / 180.0f);
+        pitchRad = pitch * (CV_PI / 180.0f);
+        rollRad = roll * (CV_PI / 180.0f);
+
+        speedX = metadata.count("Flight X Speed") ? std::stof(metadata["Flight X Speed"]) : 0.0f; // m/s (East)
+        speedY = metadata.count("Flight Y Speed") ? std::stof(metadata["Flight Y Speed"]) : 0.0f; // m/s (North)
+        speedZ = metadata.count("Flight Z Speed") ? std::stof(metadata["Flight Z Speed"]) : 0.0f; // m/s (Down)
+
+        if ((std::abs(speedX) > 1e-6f || std::abs(speedY) > 1e-6f || std::abs(speedZ) > 1e-6f) && 
+            metadata.count("Flight X Speed") && metadata.count("Flight Y Speed") && metadata.count("Flight Z Speed")) {
+            std::cout << "[Info] Using 3D Speed and Orientation parameters:\n"
+                      << "    - Speed X (East): " << speedX << " m/s\n"
+                      << "    - Speed Y (North): " << speedY << " m/s\n"
+                      << "    - Speed Z (Down): " << speedZ << " m/s\n"
+                      << "    - Yaw: " << yaw << " deg\n"
+                      << "    - Pitch: " << pitch << " deg\n"
+                      << "    - Roll: " << roll << " deg\n";
+            use3DSpeed = true;
+        } else {
+            std::cout << "[Warn] Cannot find sufficient 3D Speed parameters. Using GPS Speed.\n";
+            if (!metadata.count("GPS Speed") || !metadata.count("GPS Speed Ref")) {
+                 throw std::runtime_error("Missing GPSSpeed or GPSSpeedRef for 2D speed fallback.");
+            }
+            speed = parseExifGPSSpeed(metadata["GPS Speed"], metadata["GPS SpeedRef"]);
         }
-        speed = parseExifGPSSpeed(metadata["GPS Speed"], metadata["GPS Speed Ref"]);
+        
+        if (!metadata.count("Exposure Time")) {
+            throw std::runtime_error("Missing Exposure Time metadata.");
+        }
         exposure = parseExifExposureTime(metadata["Exposure Time"]);
-    } catch (...) {
-        std::cerr << "[Error] Image lacks essential metadata. Please check these exiftool tags:\n" 
-                << "    - FlightYawDegree\n"
-                << "    - GPSSpeed\n"
-                << "    - GPSSpeedRef\n"
-                << "    - ExposureTime\n"
-                << "    - GPSAltitude\n";
+
+    } catch (const std::exception& e) {
+        std::cerr << "[Error] Image lacks essential metadata or parsing failed: " << e.what() << "\n"
+                << "    Please check these exiftool tags:\n"
+                << "    - Flight Yaw Degree\n"
+                << "    - Flight Pitch Degree\n"
+                << "    - Flight Roll Degree\n"
+                << "    - GPS Speed\n"
+                << "    - GPS Speed Ref\n"
+                << "    - GPS Altitude\n"
+                << "    - Exposure Time\n"
+                << " If you are using 3D speed parameters, also check:\n"
+                << "    - Flight X Speed\n" 
+                << "    - Flight Y Speed\n" 
+                << "    - Flight Z Speed\n"; 
         return 0.0f;
     }
-
+    
     float alt = std::stof(metadata["GPS Altitude"]); // m
     float flen = std::stof(metadata["Focal Length"]); // mm
+    std::cout << "[DEBUG] Image Width: " << metadata["Image Width"] << " Image Height: " << metadata["Image Height"] << "\n";
     int imageWidth = std::stoi(metadata["Image Width"]); // px
     int imageHeight = std::stoi(metadata["Image Height"]); // px
 
     float gsd = calculateGSD(alt, flen, imageWidth, imageHeight, config_.sensorWidth, config_.sensorHeight); // mm/px
-    float blur = speed * 1000.0f * exposure; // mm
+    float blur = 0.0f;
+
+    if (use3DSpeed) {
+        float cy = std::cos(yawRad);
+        float sy = std::sin(yawRad);
+
+        float cp = std::cos(pitchRad);
+        float sp = std::sin(pitchRad);
+
+        float cr = std::cos(rollRad);
+        float sr = std::sin(rollRad);
+
+        // This is the rotation matrix from World (NED) to Body frame (ZYX Euler sequence):
+        // R = Rx(roll) * Ry(pitch) * Rz(yaw)
+        // Vbody = R * VNED, where VNED = [speedXEast, speedYNorth, speedZDown]^T
+        
+        // Vx body (forward/optical axis component) -> low influence on blur
+        float Vx = speedX * (cp * cy) +
+                    speedY * (cp * sy) +
+                    speedZ * (-sp);
+
+        // Vy body (right component in body frame, perpendicular to optical axis)
+        float Vy = speedX * (sr * sp * cy - cr * sy) +
+                    speedY * (sr * sp * sy + cr * cy) +
+                    speedZ * (sr * cp);
+
+        // Vz body (down component in body frame, perpendicular to optical axis)
+        float Vz = speedX * (cr * sp * cy + sr * sy) +
+                    speedY * (cr * sp * sy - sr * cy) +
+                    speedZ * (cr * cp);
+
+        float speed3D = std::sqrt(Vy * Vy + Vz * Vz);
+        
+        blur = speed3D * 1000.0f * exposure; // mm
+        blurAngleRad = std::atan2(Vz, Vy);
+    } else {
+        blur = speed * 1000.0f * exposure; // mm
+    }
+
     int blurLength = static_cast<int>(blur / gsd); // px
 
-    std::cout << "Original metadata: speed = " << speed << " m/s, yaw = " << yaw << " deg, exposure = " << exposure << " s (" << blurLength << " px blur)" << std::endl; 
+    std::cout << "Current blur length estimated: " << blur << " mm " << "(" << blurLength << " px)" << std::endl; 
 
     return std::max(1, blurLength); // px
 }
 
 // estimate point spread function (PSF)
-void Deblurrer::estimatePSF(int blurLengthPx, float yawDeg, cv::Mat& psf) {
+void Deblurrer::estimatePSF(int blurLengthPx, float blurAngleRad, cv::Mat& psf) { // Changed yawDeg to blurAngleRad
     blurLengthPx = std::max(1, blurLengthPx);
     int ksize = std::max(blurLengthPx * 2 + 1, 15) | 1;  // ensure odd
 
     psf = cv::Mat::zeros(ksize, ksize, CV_32F);
     const cv::Point2f center(ksize * 0.5f, ksize * 0.5f);
 
-    float angleRad = yawDeg * (CV_PI / 180.0f);
-    float dx = std::cos(angleRad);
-    float dy = std::sin(angleRad);
+    float dx = std::cos(blurAngleRad);
+    float dy = std::sin(blurAngleRad);
     float halfLen = 0.5f * blurLengthPx;
 
     cv::Point2f pt1(center.x - dx * halfLen, center.y - dy * halfLen);
@@ -255,14 +344,13 @@ void Deblurrer::estimatePSF(int blurLengthPx, float yawDeg, cv::Mat& psf) {
 
     psf /= static_cast<float>(normSum);
 
-    #ifdef DEBUG
+    //#ifdef DEBUG
         cv::Mat debug;
         cv::normalize(psf, debug, 0, 255, cv::NORM_MINMAX);
         debug.convertTo(debug, CV_8U);
         cv::imwrite("psf.png", debug);
-    #endif
+    //#endif
 
-    // Optional: remove for release
     std::cout << "PSF size: " << psf.cols << "x" << psf.rows << std::endl;
 }
 
@@ -484,11 +572,11 @@ void Deblurrer::deblurImage(const std::string &inputImagePath, const std::string
         }
     }    
 
-    float blurLength = findBlurLength(inputImagePath);
-    float yaw = std::stof(extractExifTagValue(inputImagePath, "FlightYawDegree"));
+    float blurAngleRad;
+    float blurLength = findBlurLength(inputImagePath, blurAngleRad);
 
     cv::Mat psf;
-    estimatePSF(blurLength, yaw, psf);
+    estimatePSF(blurLength, blurAngleRad, psf);
 
     cv::Mat deblurred;
     wienerDeconvolution(blurred, psf, deblurred, snr);

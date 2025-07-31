@@ -117,7 +117,8 @@ void copyMetadata(const std::string& sourceImagePath, const std::string& destIma
         "-CameraModelName", "-Make", "-Software", "-ModifyDate", "-ExposureTime", "-ISO",
         "-DateTimeOriginal", "-CreateDate", "-FocalLength",
         "-GPSVersionID", "-GPSLatitude", "-GPSLongitude", "-GPSAltitude", "-GPSImgDirection",
-        "-GPSSpeed", "-GPSSpeedRef", "-FlightPitchDegree", "-FlightYawDegree", "-FlightRollDegree"
+        "-GPSSpeed", "-GPSSpeedRef", "-FlightPitchDegree", "-FlightYawDegree", "-FlightRollDegree",
+        "-XMP-drone-dji:FlightXSpeed", "-XMP-drone-dji:FlightYSpeed", "-XMP-drone-dji:FlightZSpeed"
     };
 
     for (const auto& tag : tagsToCopy) {
@@ -154,7 +155,7 @@ void assignMetadata(const std::string& imagePath, const std::unordered_map<std::
         "GPSAltitude", "FocalLength", "GPSLatitude", "GPSLongitude", "GPSImgDirection",
         "GPSSpeed", "GPSSpeedRef", "ExposureTime", "ISO", "CreateDate", 
         "DateTimeOriginal", "Make", "Model", "FlightPitchDegree", "FlightYawDegree", 
-        "FlightRollDegree"
+        "FlightRollDegree", "XMP-drone-dji:FlightXSpeed", "XMP-drone-dji:FlightYSpeed", "XMP-drone-dji:FlightZSpeed"
     };
 
     std::vector<std::string> userCommentParts;
