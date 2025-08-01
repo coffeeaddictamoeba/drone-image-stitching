@@ -8,7 +8,7 @@ struct DeblurConfig {
     std::string testImagePath = "synthetic.jpg";
     std::string originalImagePath = "";
     
-    float snr = 500.0;
+    float snr = 1000.0;
     float blurThreshold = 100.0;
     float sensorWidth = 3.68f;
     float sensorHeight = 2.76f;

@@ -410,7 +410,6 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
         return;
     }
 
-    // Enable OpenCL (GPU support if available)
     cv::ocl::setUseOpenCL(true);
 
     // Normalize input
@@ -429,28 +428,73 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
 
     // Center PSF in padded matrix
     cv::Mat paddedPSF = cv::Mat::zeros(inputF.size(), CV_32F);
-    int x = (paddedPSF.cols - normPSF.cols) / 2;
-    int y = (paddedPSF.rows - normPSF.rows) / 2;
-    normPSF.copyTo(paddedPSF(cv::Rect(x, y, normPSF.cols, normPSF.rows)));
-    fftShift(paddedPSF); // Custom function to shift PSF center to corners
+    int cx = (paddedPSF.cols - normPSF.cols) / 2;
+    int cy = (paddedPSF.rows - normPSF.rows) / 2;
+    normPSF.copyTo(paddedPSF(cv::Rect(cx, cy, normPSF.cols, normPSF.rows)));
+    fftShift(paddedPSF);
 
     // FFT of PSF
     cv::Mat psfDFT;
     cv::dft(paddedPSF, psfDFT, cv::DFT_COMPLEX_OUTPUT);
 
-    // Precompute conjugate and |H|^2 + 1/SNR
+    // Conjugate and |H|^2
     std::vector<cv::Mat> psfPlanes(2);
     cv::split(psfDFT, psfPlanes);
-    cv::Mat psfMag2;
-    cv::magnitude(psfPlanes[0], psfPlanes[1], psfMag2);
-    psfMag2 = psfMag2.mul(psfMag2) + (1.0f / snr) + 1e-6f;
 
-    // Compute conjugate
+    // cv::Mat psfMag2;
+    // cv::magnitude(psfPlanes[0], psfPlanes[1], psfMag2);
+    // psfMag2 = psfMag2.mul(psfMag2);
+
+    cv::Mat psfMag2 = psfPlanes[0].mul(psfPlanes[0]) + psfPlanes[1].mul(psfPlanes[1]);
+
     psfPlanes[1] *= -1;
     cv::Mat psfConj;
     cv::merge(psfPlanes, psfConj);
 
-    // Split input into channels
+    // Adaptive SNR falloff near corners
+    cv::Mat snrMap(inputF.size(), CV_32F);
+    cv::Point center(inputF.cols / 2, inputF.rows / 2);
+    float maxDist = std::sqrt(center.x * center.x + center.y * center.y);
+    float blurLength = std::sqrt(psf.cols * psf.cols + psf.rows * psf.rows);
+    float minFactor = std::clamp(0.7f - 0.015f * blurLength, 0.3f, 0.7f);
+
+    for (int y = 0; y < snrMap.rows; ++y) {
+        for (int x = 0; x < snrMap.cols; ++x) {
+            float dx = x - center.x;
+            float dy = y - center.y;
+            float dist = std::sqrt(dx * dx + dy * dy) / maxDist;
+            float weight = std::cos(dist * CV_PI / 2.0f);
+            weight = minFactor + (1.0f - minFactor) * weight;
+            snrMap.at<float>(y, x) = weight;
+        }
+    }
+
+    // Build Wiener denominator
+    cv::Mat snrWeight = 1.0f / (snrMap * snr + 1e-6f);
+    cv::Mat wienerDenom = psfMag2 + snrWeight;
+
+    cv::Point psfCenter(psf.cols / 2, psf.rows / 2);
+    cv::Point blurVec(psf.cols - 1 - psfCenter.x, psf.rows - 1 - psfCenter.y);
+
+    // Slightly suppress blur direction using directional frequency mask
+    cv::Mat freqSuppression(inputF.size(), CV_32F, 1.0f);
+    //cv::Point blurVec(psf.cols - 1, psf.rows - 1);
+    float maxFreq = std::sqrt(center.x * center.x + center.y * center.y);
+
+    for (int y = 0; y < inputF.rows; ++y) {
+        for (int x = 0; x < inputF.cols; ++x) {
+            float dx = x - center.x;
+            float dy = y - center.y;
+            float dot = (dx * blurVec.x + dy * blurVec.y) / maxFreq;
+            float angleFactor = 1.0f - 0.25f * std::abs(dot / maxFreq);
+            freqSuppression.at<float>(y, x) = std::clamp(angleFactor, 0.7f, 1.0f);
+        }
+    }
+
+    wienerDenom /= freqSuppression;
+    wienerDenom += 1e-7f; // to remove instability
+
+    // Split into channels
     std::vector<cv::Mat> inputChannels;
     if (inputF.channels() == 1)
         inputChannels.push_back(inputF);
@@ -458,7 +502,7 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
         cv::split(inputF, inputChannels);
 
     // Shared Hann window
-    cv::Mat hann = createHannWindow2D(inputF.rows, inputF.cols); // Custom function
+    cv::Mat hann = createHannWindow2D(inputF.rows, inputF.cols);
 
     // Shared feathering mask
     cv::Mat mask(input.size(), CV_32F, 1.0f);
@@ -469,7 +513,6 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
     cv::rectangle(mask, cv::Rect(input.cols - feather, 0, feather, input.rows), 0.0f, -1);
     cv::GaussianBlur(mask, mask, cv::Size(2 * feather + 1, 2 * feather + 1), feather);
 
-    // Output container
     std::vector<cv::Mat> outputChannels(inputChannels.size());
 
     // Parallel deconvolution
@@ -480,30 +523,24 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
             cv::Mat imgDFT;
             cv::dft(chWin, imgDFT, cv::DFT_COMPLEX_OUTPUT);
 
-            // Multiply in frequency domain: imgDFT * psfConj
             cv::Mat filtered;
             cv::mulSpectrums(imgDFT, psfConj, filtered, 0);
 
-            // Divide by Wiener denominator (magnitude squared + 1/SNR)
             std::vector<cv::Mat> fPlanes(2);
             cv::split(filtered, fPlanes);
-            fPlanes[0] /= psfMag2;
-            fPlanes[1] /= psfMag2;
+            fPlanes[0] /= wienerDenom;
+            fPlanes[1] /= wienerDenom;
             cv::merge(fPlanes, filtered);
 
-            // Inverse DFT
             cv::Mat restored;
             cv::idft(filtered, restored, cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
 
-            // Undo Hann
             restored /= hann + 1e-4f;
 
-            // Crop and feather blend
             restored = restored(cv::Rect(padX, padY, input.cols, input.rows));
             cv::Mat origCrop = inputChannels[i](cv::Rect(padX, padY, input.cols, input.rows));
             restored = restored.mul(mask) + origCrop.mul(1.0f - mask);
 
-            // Clamp to [0, 1]
             cv::min(restored, 1.0f, restored);
             cv::max(restored, 0.0f, restored);
 

@@ -1,5 +1,6 @@
 #include "../include/deblur.h"
 #include "../include/helpers.h"
+#include <exception>
 
 DeblurConfig config;
 
@@ -56,8 +57,8 @@ int main(int argc, char** argv) {
             Deblurrer deblurrer(config);
             deblurrer.deblurImage(blurredImage, deblurredImage, config.snr);
             return 0;
-        } catch (...) {
-            std::cerr << "Wrong arguments.\n";
+        } catch (std::exception &e) {
+            std::cerr << "Error: " << e.what() << "\n";
             return 1;
         }
     }
