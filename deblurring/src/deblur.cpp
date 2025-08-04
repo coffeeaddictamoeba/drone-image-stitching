@@ -313,7 +313,7 @@ float Deblurrer::findBlurLength(const std::string &imagePath, float &blurAngleRa
 }
 
 // estimate point spread function (PSF)
-void Deblurrer::estimatePSF(int blurLengthPx, float blurAngleRad, cv::Mat& psf) { // Changed yawDeg to blurAngleRad
+void Deblurrer::estimatePSF(int blurLengthPx, float blurAngleRad, cv::Mat& psf) {
     blurLengthPx = std::max(1, blurLengthPx);
     int ksize = std::max(blurLengthPx * 2 + 1, 15) | 1;  // ensure odd
 
@@ -431,7 +431,7 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
     int cx = (paddedPSF.cols - normPSF.cols) / 2;
     int cy = (paddedPSF.rows - normPSF.rows) / 2;
     normPSF.copyTo(paddedPSF(cv::Rect(cx, cy, normPSF.cols, normPSF.rows)));
-    fftShift(paddedPSF);
+    fftShift(paddedPSF); // IMPORTANT: initial PSF is placed at center, fftShift moves PSF to (0,0)
 
     // FFT of PSF
     cv::Mat psfDFT;
@@ -441,47 +441,44 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
     std::vector<cv::Mat> psfPlanes(2);
     cv::split(psfDFT, psfPlanes);
 
-    // cv::Mat psfMag2;
-    // cv::magnitude(psfPlanes[0], psfPlanes[1], psfMag2);
-    // psfMag2 = psfMag2.mul(psfMag2);
-
     cv::Mat psfMag2 = psfPlanes[0].mul(psfPlanes[0]) + psfPlanes[1].mul(psfPlanes[1]);
+    double psfMaxVal;
+    cv::minMaxLoc(psfMag2, nullptr, &psfMaxVal);
+    psfMag2 /= static_cast<float>(psfMaxVal + 1e-6f);
 
     psfPlanes[1] *= -1;
     cv::Mat psfConj;
     cv::merge(psfPlanes, psfConj);
 
-    // Adaptive SNR falloff near corners
     cv::Mat snrMap(inputF.size(), CV_32F);
     cv::Point center(inputF.cols / 2, inputF.rows / 2);
     float maxDist = std::sqrt(center.x * center.x + center.y * center.y);
     float blurLength = std::sqrt(psf.cols * psf.cols + psf.rows * psf.rows);
     float minFactor = std::clamp(0.7f - 0.015f * blurLength, 0.3f, 0.7f);
 
-    for (int y = 0; y < snrMap.rows; ++y) {
+    for (int y = 0; y < snrMap.rows; ++y)
         for (int x = 0; x < snrMap.cols; ++x) {
             float dx = x - center.x;
             float dy = y - center.y;
             float dist = std::sqrt(dx * dx + dy * dy) / maxDist;
             float weight = std::cos(dist * CV_PI / 2.0f);
-            weight = minFactor + (1.0f - minFactor) * weight;
-            snrMap.at<float>(y, x) = weight;
+            snrMap.at<float>(y, x) = minFactor + (1.0f - minFactor) * weight;
         }
-    }
 
     // Build Wiener denominator
     cv::Mat snrWeight = 1.0f / (snrMap * snr + 1e-6f);
     cv::Mat wienerDenom = psfMag2 + snrWeight;
+
+    cv::threshold(wienerDenom, wienerDenom, 1e-5f, 1.0f, cv::THRESH_TOZERO);
 
     cv::Point psfCenter(psf.cols / 2, psf.rows / 2);
     cv::Point blurVec(psf.cols - 1 - psfCenter.x, psf.rows - 1 - psfCenter.y);
 
     // Slightly suppress blur direction using directional frequency mask
     cv::Mat freqSuppression(inputF.size(), CV_32F, 1.0f);
-    //cv::Point blurVec(psf.cols - 1, psf.rows - 1);
     float maxFreq = std::sqrt(center.x * center.x + center.y * center.y);
 
-    for (int y = 0; y < inputF.rows; ++y) {
+    for (int y = 0; y < inputF.rows; ++y)
         for (int x = 0; x < inputF.cols; ++x) {
             float dx = x - center.x;
             float dy = y - center.y;
@@ -489,24 +486,22 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
             float angleFactor = 1.0f - 0.25f * std::abs(dot / maxFreq);
             freqSuppression.at<float>(y, x) = std::clamp(angleFactor, 0.7f, 1.0f);
         }
-    }
 
     wienerDenom /= freqSuppression;
-    wienerDenom += 1e-7f; // to remove instability
+    float baseEps = std::clamp(0.0001f * blurLength, 1e-4f, 1e-3f);
+    cv::max(wienerDenom, baseEps, wienerDenom);
 
     // Split into channels
     std::vector<cv::Mat> inputChannels;
-    if (inputF.channels() == 1)
-        inputChannels.push_back(inputF);
-    else
-        cv::split(inputF, inputChannels);
+    if (inputF.channels() == 1) inputChannels.push_back(inputF);
+    else cv::split(inputF, inputChannels);
 
     // Shared Hann window
     cv::Mat hann = createHannWindow2D(inputF.rows, inputF.cols);
 
     // Shared feathering mask
     cv::Mat mask(input.size(), CV_32F, 1.0f);
-    int feather = std::min(30, std::min(input.cols, input.rows) / 10);
+    int feather = std::min(60, std::min(input.cols, input.rows) / 10);
     cv::rectangle(mask, cv::Rect(0, 0, input.cols, feather), 0.0f, -1);
     cv::rectangle(mask, cv::Rect(0, input.rows - feather, input.cols, feather), 0.0f, -1);
     cv::rectangle(mask, cv::Rect(0, 0, feather, input.rows), 0.0f, -1);
@@ -519,7 +514,6 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
     cv::parallel_for_(cv::Range(0, static_cast<int>(inputChannels.size())), [&](const cv::Range& range) {
         for (int i = range.start; i < range.end; ++i) {
             cv::Mat chWin = inputChannels[i].mul(hann);
-
             cv::Mat imgDFT;
             cv::dft(chWin, imgDFT, cv::DFT_COMPLEX_OUTPUT);
 
@@ -528,6 +522,11 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
 
             std::vector<cv::Mat> fPlanes(2);
             cv::split(filtered, fPlanes);
+
+            cv::Mat safeMask = (wienerDenom > 1e-3f);
+            fPlanes[0].setTo(0, ~safeMask);
+            fPlanes[1].setTo(0, ~safeMask);
+
             fPlanes[0] /= wienerDenom;
             fPlanes[1] /= wienerDenom;
             cv::merge(fPlanes, filtered);
@@ -549,13 +548,12 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
     });
 
     // Merge channels and convert
-    cv::Mat merged;
     if (outputChannels.size() == 1)
-        merged = outputChannels[0];
+        output = outputChannels[0];
     else
-        cv::merge(outputChannels, merged);
+        cv::merge(outputChannels, output);
 
-    merged.convertTo(output, CV_8U, 255.0);
+    output.convertTo(output, CV_8U, 255.0);
 }
 
 void Deblurrer::denoiseImage(cv::Mat& image, float strength = 10.0f, float edgeStrength = 0.4f) {
