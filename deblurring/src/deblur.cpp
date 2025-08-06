@@ -10,8 +10,31 @@
 #include <string>
 #include <unordered_map>
 
-Deblurrer::Deblurrer(DeblurConfig &config) {
-    this->config_ = config;
+Deblurrer::Deblurrer(DeblurConfig &config) { this->config_ = config; }
+
+
+// -------------------- DEBUG HELPERS ----------------------------------------
+
+void visualizeMatrix(cv::Mat image, std::string outputImagePath) {
+    cv::Mat debug;
+    cv::normalize(image, debug, 0, 255, cv::NORM_MINMAX);
+    debug.convertTo(debug, CV_8U);
+    cv::imwrite(outputImagePath, debug);
+}
+
+void visualizeMagnitude(cv::Mat complexImage, std::string outputImagePath) {
+    std::vector<cv::Mat> planes;
+    cv::split(complexImage, planes);
+
+    cv::Mat mag;
+    cv::magnitude(planes[0], planes[1], mag);
+    mag += 1e-5f;
+
+    cv::log(mag, mag);
+    cv::normalize(mag, mag, 0, 255, cv::NORM_MINMAX);
+    mag.convertTo(mag, CV_8U);
+
+    visualizeMatrix(mag, outputImagePath);
 }
 
 
@@ -37,16 +60,16 @@ cv::Mat Deblurrer::createTestImage(int width = 640, int height = 480) {
 std::unordered_map<std::string, std::string> Deblurrer::createTestMetadata() {
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_real_distribution<> altitudeDist(50.0, 150.0);       // meters
-    std::uniform_real_distribution<> focalLengthDist(2.0, 5.0);       // mm
-    std::uniform_real_distribution<> speedDist(15.0, 25.0);            // km/h
-    std::uniform_real_distribution<> speedXDist(15.0, 25.0);            // m/s
-    std::uniform_real_distribution<> speedYDist(15.0, 25.0);            // m/s
-    std::uniform_real_distribution<> speedZDist(15.0, 25.0);            // m/s
-    std::uniform_real_distribution<> yawDist(0.0, 360.0);             // degrees
-    std::uniform_real_distribution<> pitchDist(0.0, 360.0);             // degrees
-    std::uniform_real_distribution<> rollDist(0.0, 360.0);             // degrees
-    std::uniform_real_distribution<> exposureDist(1.0 / 10.0, 1.0 / 5.0); // seconds
+    std::uniform_real_distribution<> altitudeDist(50.0, 250.0);            // meters
+    std::uniform_real_distribution<> focalLengthDist(2.0, 5.0);            // mm
+    std::uniform_real_distribution<> speedDist(10.0, 25.0);                // km/h
+    std::uniform_real_distribution<> speedXDist(10.0, 25.0);               // m/s
+    std::uniform_real_distribution<> speedYDist(10.0, 25.0);               // m/s
+    std::uniform_real_distribution<> speedZDist(10.0, 25.0);               // m/s
+    std::uniform_real_distribution<> yawDist(0.0, 360.0);                  // degrees
+    std::uniform_real_distribution<> pitchDist(0.0, 360.0);                // degrees
+    std::uniform_real_distribution<> rollDist(0.0, 360.0);                 // degrees
+    std::uniform_real_distribution<> exposureDist(1.0 / 10.0, 1.0 / 5.0);  // seconds
 
     float altitude = altitudeDist(gen);
     float focalLength = focalLengthDist(gen);
@@ -73,10 +96,12 @@ std::unordered_map<std::string, std::string> Deblurrer::createTestMetadata() {
         { "Exposure Time", std::to_string(exposure) }
     };
 
+    #ifdef DEBUG
     std::cout << "Randomized metadata:\n";
     for (const auto& kv : metadata) {
         std::cout << "  " << kv.first << " = " << kv.second << "\n";
     }
+    #endif
 
     return metadata;
 }
@@ -116,13 +141,15 @@ bool Deblurrer::isBlurred(const cv::Mat &image, float blurThreshold = 100.0f) {
 
     double variance = stdDev.val[0] * stdDev.val[0];
 
-    std::cout << "[Info] Blur detection: Variance of Laplacian estimated: " << variance << "\n";
+    #ifdef DEBUG
+        std::cout << "[Info] Blur detection: Variance of Laplacian estimated: " << variance << "\n";
+    #endif
 
     if (variance < blurThreshold) {
-        std::cout << "[Info] Image is likely blurred.\n";
+        std::cout << "[Info] Image is likely blurred." << std::endl;
         return true;
     } else {
-        std::cout << "[Info] Image is likely sharp.\n";
+        std::cout << "[Info] Image is likely sharp." << std::endl;
         return false;
     }
 }
@@ -132,7 +159,7 @@ bool Deblurrer::isBlurred(const std::string &imagePath, float blurThreshold = 10
     cv::Mat image = cv::imread(imagePath);
 
     if (image.empty()) {
-        std::cerr << "[ERROR] isBlurred: Failed to load image from " << imagePath << "\n";
+        std::cerr << "[ERROR] isBlurred: Failed to load image from " << imagePath << std::endl;
         return false;
     }
 
@@ -151,13 +178,15 @@ bool Deblurrer::isBlurred(const std::string &imagePath, float blurThreshold = 10
 
     double variance = stdDev.val[0] * stdDev.val[0];
 
-    std::cout << "[Info] Blur detection: Variance of Laplacian estimated: " << variance << "\n";
+    #ifdef DEBUG
+        std::cout << "[Info] Blur detection: Variance of Laplacian estimated: " << variance << "\n";
+    #endif
 
     if (variance < blurThreshold) {
-        std::cout << "[Info] Image is likely blurred.\n";
+        std::cout << "[Info] Image is likely blurred." << std::endl;
         return true;
     } else {
-        std::cout << "[Info] Image is likely sharp.\n";
+        std::cout << "[Info] Image is likely sharp." << std::endl;
         return false;
     }
 }
@@ -165,9 +194,10 @@ bool Deblurrer::isBlurred(const std::string &imagePath, float blurThreshold = 10
 // blur input image (works for both real and test-generated images)
 void Deblurrer::blurImage(const std::string &inputImagePath, const std::string &outputImagePath, bool grayscale) {
     int imreadFlag = grayscale ? cv::IMREAD_GRAYSCALE : cv::IMREAD_COLOR;
+
     cv::Mat normal = cv::imread(inputImagePath, imreadFlag);
     if (normal.empty()) {
-        std::cerr << "Failed to load image: " << inputImagePath << "\n";
+        std::cerr << "Failed to load image: " << inputImagePath << std::endl;
         return; 
     }
 
@@ -207,9 +237,9 @@ float Deblurrer::findBlurLength(const std::string &imagePath, float &blurAngleRa
     float rollRad = 0.0f;
 
     try {
-        yaw = metadata.count("Flight Yaw Degree") ? std::stof(metadata["Flight Yaw Degree"]) : 0.0f; // degrees
+        yaw = metadata.count("Flight Yaw Degree") ? std::stof(metadata["Flight Yaw Degree"]) : 0.0f;       // degrees
         pitch = metadata.count("Flight Pitch Degree") ? std::stof(metadata["Flight Pitch Degree"]) : 0.0f; // degrees
-        roll = metadata.count("Flight Roll Degree") ? std::stof(metadata["Flight Roll Degree"]) : 0.0f; // degrees
+        roll = metadata.count("Flight Roll Degree") ? std::stof(metadata["Flight Roll Degree"]) : 0.0f;    // degrees
 
         yawRad = yaw * (CV_PI / 180.0f);
         pitchRad = pitch * (CV_PI / 180.0f);
@@ -221,6 +251,7 @@ float Deblurrer::findBlurLength(const std::string &imagePath, float &blurAngleRa
 
         if ((std::abs(speedX) > 1e-6f || std::abs(speedY) > 1e-6f || std::abs(speedZ) > 1e-6f) && 
             metadata.count("Flight X Speed") && metadata.count("Flight Y Speed") && metadata.count("Flight Z Speed")) {
+            #ifdef DEBUG
             std::cout << "[Info] Using 3D Speed and Orientation parameters:\n"
                       << "    - Speed X (East): " << speedX << " m/s\n"
                       << "    - Speed Y (North): " << speedY << " m/s\n"
@@ -228,6 +259,7 @@ float Deblurrer::findBlurLength(const std::string &imagePath, float &blurAngleRa
                       << "    - Yaw: " << yaw << " deg\n"
                       << "    - Pitch: " << pitch << " deg\n"
                       << "    - Roll: " << roll << " deg\n";
+            #endif
             use3DSpeed = true;
         } else {
             std::cout << "[Warn] Cannot find sufficient 3D Speed parameters. Using GPS Speed.\n";
@@ -259,10 +291,9 @@ float Deblurrer::findBlurLength(const std::string &imagePath, float &blurAngleRa
         return 0.0f;
     }
     
-    float alt = std::stof(metadata["GPS Altitude"]); // m
-    float flen = std::stof(metadata["Focal Length"]); // mm
-    std::cout << "[DEBUG] Image Width: " << metadata["Image Width"] << " Image Height: " << metadata["Image Height"] << "\n";
-    int imageWidth = std::stoi(metadata["Image Width"]); // px
+    float alt = std::stof(metadata["GPS Altitude"]);       // m
+    float flen = std::stof(metadata["Focal Length"]);      // mm
+    int imageWidth = std::stoi(metadata["Image Width"]);   // px
     int imageHeight = std::stoi(metadata["Image Height"]); // px
 
     float gsd = calculateGSD(alt, flen, imageWidth, imageHeight, config_.sensorWidth, config_.sensorHeight); // mm/px
@@ -307,7 +338,9 @@ float Deblurrer::findBlurLength(const std::string &imagePath, float &blurAngleRa
 
     int blurLength = static_cast<int>(blur / gsd); // px
 
-    std::cout << "Current blur length estimated: " << blur << " mm " << "(" << blurLength << " px)" << std::endl; 
+    #ifdef DEBUG
+        std::cout << "[Info] Current blur length estimated: " << blur << " mm " << "(" << blurLength << " px)" << std::endl; 
+    #endif
 
     return std::max(1, blurLength); // px
 }
@@ -344,30 +377,28 @@ void Deblurrer::estimatePSF(int blurLengthPx, float blurAngleRad, cv::Mat& psf) 
 
     psf /= static_cast<float>(normSum);
 
-    //#ifdef DEBUG
-        cv::Mat debug;
-        cv::normalize(psf, debug, 0, 255, cv::NORM_MINMAX);
-        debug.convertTo(debug, CV_8U);
-        cv::imwrite("psf.png", debug);
-    //#endif
-
-    std::cout << "PSF size: " << psf.cols << "x" << psf.rows << std::endl;
+    #ifdef DEBUG
+        visualizeMatrix(psf, "psf.png");
+        std::cout << "PSF size: " << psf.cols << "x" << psf.rows << std::endl;
+    #endif    
 }
 
 // calculate ground sample distance (GSD)
 float Deblurrer::calculateGSD(float altitude, float focalLength, int imageWidth, int imageHeight, float sensorWidth = 3.68f, float sensorHeight = 2.76f) {
     altitude *= 1000.0f; // m -> mm
 
-    float gsdWidth = (altitude * sensorWidth) / (focalLength * imageWidth); // mm/px
+    float gsdWidth = (altitude * sensorWidth) / (focalLength * imageWidth);    // mm/px
     float gsdHeight = (altitude * sensorHeight) / (focalLength * imageHeight); // mm/px
 
     float gsd = std::max(gsdWidth, gsdHeight); // mm/px
 
-    std::cout << "GSD: Calculated GSD = " << gsd << " mm/px\n";
-    std::cout << "  Focal Length: " << focalLength << " mm\n";
-    std::cout << "  Sensor Size: " << sensorWidth << "x" << sensorHeight << " mm\n";
-    std::cout << "  Image Resolution: " << imageWidth << "x" << imageHeight << " px\n";
-    std::cout << "  Altitude: " << altitude << " mm\n";
+    #ifdef DEBUG
+        std::cout << "GSD: Calculated GSD = " << gsd << " mm/px\n";
+        std::cout << "  Focal Length: " << focalLength << " mm\n";
+        std::cout << "  Sensor Size: " << sensorWidth << "x" << sensorHeight << " mm\n";
+        std::cout << "  Image Resolution: " << imageWidth << "x" << imageHeight << " px\n";
+        std::cout << "  Altitude: " << altitude << " mm\n";
+    #endif
 
     return gsd;
 }
@@ -410,7 +441,7 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
         return;
     }
 
-    cv::ocl::setUseOpenCL(true);
+    cv::ocl::setUseOpenCL(true); // turn on GPU if available
 
     // Normalize input
     cv::Mat inputF;
@@ -450,6 +481,7 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
     cv::Mat psfConj;
     cv::merge(psfPlanes, psfConj);
 
+    // SNR map for smart SNR distribution to make image corners noise less visible
     cv::Mat snrMap(inputF.size(), CV_32F);
     cv::Point center(inputF.cols / 2, inputF.rows / 2);
     float maxDist = std::sqrt(center.x * center.x + center.y * center.y);
@@ -556,9 +588,186 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
     output.convertTo(output, CV_8U, 255.0);
 }
 
+// EXPERIMENTAL
+cv::Mat estimateGhostMask(const cv::Mat& input, const cv::Mat& psf, float blurThreshold = 0.1f) {
+    cv::Mat gray;
+    if (input.channels() == 3)
+        cv::cvtColor(input, gray, cv::COLOR_BGR2GRAY);
+    else
+        gray = input.clone();
+    gray.convertTo(gray, CV_32F, 1.0 / 255.0);
+
+    // Estimate blur direction from PSF
+    cv::Moments m = cv::moments(psf, true);
+    double cx = psf.cols / 2.0;
+    double cy = psf.rows / 2.0;
+    double dx = (m.m10 / m.m00) - cx;
+    double dy = (m.m01 / m.m00) - cy;
+
+    if (std::abs(dx) + std::abs(dy) < 1e-3) {
+        dx = 1.0; dy = 0.0;
+    }
+
+    // Build directional filter (Sobel-like)
+    cv::Point2f dir(dx, dy);
+    float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+    dir *= 1.0f / len;
+
+    cv::Mat gradX, gradY;
+    cv::Sobel(gray, gradX, CV_32F, 1, 0, 3);
+    cv::Sobel(gray, gradY, CV_32F, 0, 1, 3);
+
+    cv::Mat proj = gradX * dir.x + gradY * dir.y;
+    cv::Mat energy = proj.mul(proj);
+
+    // Smooth and threshold
+    cv::GaussianBlur(energy, energy, cv::Size(11, 11), 5);
+    double maxVal;
+    cv::minMaxLoc(energy, nullptr, &maxVal);
+
+    cv::Mat mask;
+    cv::threshold(energy, mask, blurThreshold * maxVal, 1.0, cv::THRESH_BINARY);
+
+    #ifdef DEBUG
+        visualizeMatrix(mask, "ghosting_mask.png");
+    #endif
+
+    return mask;
+}
+
+cv::Mat estimateGhostMaskHF(const cv::Mat& deblurred) {
+    cv::Mat gray, blurred, lap1, lap2, diff;
+    cv::cvtColor(deblurred, gray, cv::COLOR_BGR2GRAY);
+    gray.convertTo(gray, CV_32F, 1/255.0f);
+
+    cv::GaussianBlur(gray, blurred, cv::Size(0,0), 2.0);
+    cv::Laplacian(gray, lap1, CV_32F, 3);
+    cv::Laplacian(blurred, lap2, CV_32F, 3);
+    diff = cv::abs(lap1 - lap2);
+
+    cv::normalize(diff, diff, 0, 1, cv::NORM_MINMAX);
+    cv::GaussianBlur(diff, diff, cv::Size(15,15), 5);
+    
+    #ifdef DEBUG
+        visualizeMatrix(diff, "ghosting_mask_hf.png");
+    #endif
+
+    return diff;  // soft ghostiness map [0..1]
+}
+
+cv::Mat estimateGhostMaskDirectional(const cv::Mat& deblurred, const cv::Mat& psf) {
+    cv::Mat gray; 
+    cv::cvtColor(deblurred, gray, cv::COLOR_BGR2GRAY); 
+    gray.convertTo(gray, CV_32F, 1 / 255.0f);
+
+    cv::Mat gx, gy;
+    cv::Sobel(gray, gx, CV_32F, 1, 0), cv::Sobel(gray, gy, CV_32F, 0, 1);
+
+    cv::Moments m = cv::moments(psf, true);
+    double cx = psf.cols / 2.0, cy = psf.rows / 2.0;
+    double dx = (m.m10 / m.m00) - cx, dy = (m.m01 / m.m00) - cy;
+
+    if (fabs(dx) + fabs(dy) < 1e-3) dx=1, dy=0;
+
+    cv::Point2f dir(dx, dy);
+    dir *= (1 / std::sqrt(dx * dx + dy * dy));
+
+    cv::Mat proj = gx * dir.x + gy * dir.y;
+    cv::Mat energy = proj.mul(proj);
+    cv::GaussianBlur(energy, energy, cv::Size(13,13), 4);
+    cv::normalize(energy, energy, 0, 1, cv::NORM_MINMAX);
+
+    return energy;
+}
+
+cv::Mat fuseGhostMasks(const cv::Mat& m1, const cv::Mat& m2) {
+    cv::Mat fuse = cv::max(m1, m2);
+    cv::GaussianBlur(fuse, fuse, cv::Size(15,15), 5);
+    return fuse;
+}
+
+cv::Mat smoothGhostRegions(const cv::Mat& input, const cv::Mat& ghostMask, float strength = 0.5f) {
+    cv::Mat inputF;
+    input.convertTo(inputF, CV_32F, 1 / 255.0f);
+
+    cv::Mat smooth;
+    cv::edgePreservingFilter(inputF, smooth, cv::RECURS_FILTER, 60, 0.7f);
+
+    std::vector<cv::Mat> inCh, smCh, outCh;
+    cv::split(inputF, inCh);
+    cv::split(smooth, smCh);
+
+    cv::Mat ghostF;
+    ghostMask.convertTo(ghostF, CV_32F, 1.0 / 255.0);
+
+    for (int i = 0; i < inCh.size(); ++i) {
+        cv::Mat w2, w1;
+
+        // w2 = strength * ghostF
+        cv::multiply(ghostF, strength, w2, 1.0, CV_32F);
+
+        // w1 = 1.0 - w2
+        cv::subtract(1.0f, w2, w1, cv::noArray(), CV_32F);
+
+        cv::Mat a, b, blended;
+        cv::multiply(inCh[i], w1, a, 1.0, CV_32F);
+        cv::multiply(smCh[i], w2, b, 1.0, CV_32F);
+        cv::add(a, b, blended, cv::noArray(), CV_32F);
+
+        outCh.push_back(blended);
+    }
+
+    cv::Mat outF;
+    cv::merge(outCh, outF);
+    cv::min(outF, 1.0f, outF);
+    cv::max(outF, 0.0f, outF);
+
+    cv::Mat output;
+    outF.convertTo(output, CV_8U, 255.0f);
+
+    return output;
+}
+
+void Deblurrer::suppressGhosting(const cv::Mat& deblurred, const cv::Mat& psf, const cv::Mat& original, cv::Mat& output) {
+    CV_Assert(deblurred.size() == original.size() && deblurred.type() == original.type());
+    std::cout << "[Info] Start suppressing ghosting artifacts.\n";
+
+    cv::Mat mHF = estimateGhostMaskHF(deblurred);
+    cv::Mat mDir = estimateGhostMaskDirectional(deblurred, psf);
+    cv::Mat ghostMask = fuseGhostMasks(mHF, mDir);
+
+    cv::threshold(ghostMask, ghostMask, 0.2f, 1.0f, cv::THRESH_TOZERO);
+    cv::normalize(ghostMask, ghostMask, 0, 1, cv::NORM_MINMAX);
+
+    cv::Mat cleaned = smoothGhostRegions(deblurred, ghostMask, 0.7f);
+
+    cv::Mat deblurF, origF, maskCh;
+    deblurred.convertTo(deblurF, CV_32F, 1 / 255.0f);
+    original.convertTo(origF, CV_32F, 1 / 255.0f);
+
+    std::vector<cv::Mat> masks(deblurred.channels(), ghostMask);
+    cv::merge(masks, maskCh);
+
+    cv::Mat invMaskCh;
+    cv::subtract(1.0f, maskCh, invMaskCh, cv::noArray(), CV_32F);
+
+    cv::Mat cleanedF;
+    cleaned.convertTo(cleanedF, CV_32F, 1.0 / 255.0);
+
+    cv::Mat part1 = cleanedF.mul(maskCh);
+    cv::Mat part2 = deblurF.mul(invMaskCh);
+    cv::Mat outF = part1 + part2;
+
+    cv::min(outF, 1.0f, outF);
+    cv::max(outF, 0.0f, outF);
+    outF.convertTo(output, CV_8U, 255.0f);
+
+    std::cout << "[Info] Finish suppressing ghosting artifacts.\n";
+}
+
 void Deblurrer::denoiseImage(cv::Mat& image, float strength = 10.0f, float edgeStrength = 0.4f) {
     if (image.empty()) {
-        std::cerr << "[Error] Denoise input image is empty.\n";
+        std::cerr << "[Error] Denoise input image is empty." << std::endl;
         return;
     }
 
@@ -580,7 +789,7 @@ void Deblurrer::denoiseImage(cv::Mat& image, float strength = 10.0f, float edgeS
 
 void Deblurrer::recoverBrightness(cv::Mat& image, float gamma) {
     if (image.empty()) {
-        std::cerr << "[Error] Gamma correction input image is empty.\n";
+        std::cerr << "[Error] Gamma correction input image is empty." << std::endl;
         return;
     }
 
@@ -596,7 +805,7 @@ void Deblurrer::recoverBrightness(cv::Mat& image, float gamma) {
 void Deblurrer::deblurImage(const std::string &inputImagePath, const std::string &outputImagePath, float snr = 500.0) {
     cv::Mat blurred = cv::imread(inputImagePath);
     if (blurred.empty()) {
-        std::cerr << "Failed to load image: " << inputImagePath << "\n";
+        std::cerr << "Failed to load image: " << inputImagePath << std::endl;
         return;
     }
 
@@ -616,16 +825,20 @@ void Deblurrer::deblurImage(const std::string &inputImagePath, const std::string
     cv::Mat deblurred;
     wienerDeconvolution(blurred, psf, deblurred, snr);
 
+    cv::Mat output;
+    suppressGhosting(deblurred, psf, blurred, output);
+
     if (config_.denoise) {
-        if (!deblurred.empty()) {
+        if (!output.empty()) {
             std::cout << "[Info] Applying post-deconvolution denoising.\n";
-            denoiseImage(deblurred);
+            denoiseImage(output);
         } else {
             std::cerr << "[Warn] Output image is empty. Skipping denoising and recovery step.\n";
         }
     }
 
-    cv::imwrite(outputImagePath, deblurred);
+    cv::imwrite(outputImagePath, output);
     copyMetadata(inputImagePath, outputImagePath);
+
     std::cout << "Deblurred image saved to: " << outputImagePath << "\n";
 }

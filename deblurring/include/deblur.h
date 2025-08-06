@@ -30,8 +30,13 @@ class Deblurrer {
         void denoiseImage(cv::Mat& image, float strength, float edgeStrength);
         void recoverBrightness(cv::Mat& image, float gamma);
         bool isBlurred(const cv::Mat &image, float blurThreshold);
+        void suppressGhosting(const cv::Mat& deblurred, const cv::Mat& psf, const cv::Mat& original, cv::Mat& output);
 
         // for testing purposes
         cv::Mat createTestImage(int width, int height);
         std::unordered_map<std::string, std::string> createTestMetadata();
+
+        // for debugging
+        void visualizeMatrix(cv::Mat image, std::string outputImagePath); // for matrix visualization
+        void visualizeMagnitude(cv::Mat complexImage, std::string outputImagePath); // for complex matrix magnitude visualization
     };
