@@ -16,12 +16,13 @@ class Deblurrer {
         void blurImage(const std::string &inputImagePath, const std::string &outputImagePath, bool grayscale);
         void deblurImage(const std::string &inputImagePath, const std::string &outputImagePath, float snr);
         bool isBlurred(const std::string &imagePath, float blurThreshold);
+        void testPSF(const std::string &inputImagePath);
     
     private:
-        // for arguments handling
+        // For arguments handling
         DeblurConfig config_;
 
-        // for actual deblurring
+        // For actual deblurring
         float findBlurLength(const std::string &imagePath, float &blurAngleRad);
         float calculateGSD(float altitude, float focalLength, int imageWidth, int imageHeight, float sensorWidth, float sensorHeight);
         void fftShift(cv::Mat& input);
@@ -32,11 +33,18 @@ class Deblurrer {
         bool isBlurred(const cv::Mat &image, float blurThreshold);
         void suppressGhosting(const cv::Mat& deblurred, const cv::Mat& psf, const cv::Mat& original, cv::Mat& output);
 
-        // for testing purposes
+        // Deblur helpers
+        cv::Mat padInput(const cv::Mat& input, const cv::Mat& psf);
+        cv::Mat normalizePSF(const cv::Mat& psf);
+        cv::Mat psfdft(const cv::Mat& normPSF, cv::Size targetSize);
+        std::pair<cv::Mat, cv::Mat> psfConjMag(const cv::Mat& psfDFT);
+        cv::Mat createSNRMap(cv::Size size, const cv::Mat& psf);
+        cv::Mat buildWienerDenominator(const cv::Mat& psfMag2, const cv::Mat& snrMap, float snr, const cv::Mat& inputF, const cv::Mat& psf);
+        std::vector<cv::Mat> splitInputChannels(const cv::Mat& inputF);
+        cv::Mat createFeatherMask(cv::Size size);
+        std::vector<cv::Mat> deconvolve(const std::vector<cv::Mat>& inputChannels, const cv::Mat& psfConj, const cv::Mat& wienerDenom, const cv::Mat& hann, const cv::Mat& mask, const cv::Mat& originalInput, const cv::Mat& psf);
+
+        // For testing purposes
         cv::Mat createTestImage(int width, int height);
         std::unordered_map<std::string, std::string> createTestMetadata();
-
-        // for debugging
-        void visualizeMatrix(cv::Mat image, std::string outputImagePath); // for matrix visualization
-        void visualizeMagnitude(cv::Mat complexImage, std::string outputImagePath); // for complex matrix magnitude visualization
     };
