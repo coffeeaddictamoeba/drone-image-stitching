@@ -1,6 +1,10 @@
 #include "../include/deblur.h"
 #include "../include/helpers.h"
+#include "../include/monitor.h"
+#include <csignal>
+#include <cstring>
 #include <exception>
+#include <string>
 
 DeblurConfig config;
 
@@ -14,11 +18,19 @@ void parseArgs(int argc, char* argv[]) {
             break;
         } else if (arg == "--blur" && i + 1 < argc) {
             config.blur = true;
-            config.originalImagePath = argv[++i];
-        }
-        else if (arg == "--overwrite-metadata") config.overwriteMetadata = true;
-        else if (arg == "--denoise") config.denoise = true;
-        else if (arg == "--force") config.forceDeblurring = true;
+            if (std::strcmp(argv[i+1], "--source-dir") != 0) // allow to blur all images in specified directory
+                config.originalImagePath = argv[++i]; // only in case of single input image for blurring
+        } else if (arg == "--source-dir" && i + 1 < argc) {
+            config.monitorDir = true;
+            config.sourceDir = argv[++i];
+        } else if (arg == "--target-dir" && i + 1 < argc) 
+            config.targetDir = argv[++i];
+        else if (arg == "--overwrite-metadata") 
+            config.overwriteMetadata = true;
+        else if (arg == "--denoise") 
+            config.denoise = true;
+        else if (arg == "--force") 
+            config.forceDeblurring = true;
         else if (arg == "--snr" && i + 1 < argc)
             config.snr = std::stof(argv[++i]);
         else if (arg == "--blur-threshold" && i + 1 < argc)
@@ -41,21 +53,46 @@ int main(int argc, char** argv) {
         deblurrer.generateTest();
         return 0;
     } else if (config.blur) { // blur image
-        std::string imageToBlur = config.originalImagePath;
-        std::string prefix = "_blurred";
-        std::string blurredImage = constructPathWithPrefix(imageToBlur, prefix);
-
-        Deblurrer deblurrer(config);
-        deblurrer.blurImage(imageToBlur, blurredImage, false);
-        return 0;
-    } else { // deblur image
-        try {
-            std::string blurredImage = argv[1]; // not very flexible
-            std::string prefix = "_deblurred";
-            std::string deblurredImage = constructPathWithPrefix(blurredImage, prefix);
+        if (!config.monitorDir) {
+            std::string imageToBlur = config.originalImagePath;
+    
+            Deblurrer deblurrer(config);
+            deblurrer.blurImage(imageToBlur, false);
+            return 0;
+        } else { // blur all images from specified directory
+            std::signal(SIGINT, signalHandler);
+            std::string sourceDir = config.sourceDir;
 
             Deblurrer deblurrer(config);
-            deblurrer.deblurImage(blurredImage, deblurredImage, config.snr);
+
+            DirectoryMonitor monitor(sourceDir, std::bind(&Deblurrer::blurImage, &deblurrer, std::placeholders::_1, false));
+            
+            monitor.start();
+            while (!stopFlag) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+            monitor.stop();
+            return 0;
+        }
+    } else if (config.monitorDir) { // deblur all images from specified directory
+        std::signal(SIGINT, signalHandler);
+        std::string sourceDir = config.sourceDir;
+
+        Deblurrer deblurrer(config);
+
+        DirectoryMonitor monitor(sourceDir, std::bind(&Deblurrer::deblurImage, &deblurrer, std::placeholders::_1, config.snr));
+        monitor.start();
+        while (!stopFlag) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        monitor.stop();
+        return 0;
+    } else { // deblur single image
+        try {
+            std::string blurredImage = argv[1];
+
+            Deblurrer deblurrer(config);
+            deblurrer.deblurImage(blurredImage, config.snr);
             return 0;
         } catch (std::exception &e) {
             std::cerr << "Error: " << e.what() << "\n";

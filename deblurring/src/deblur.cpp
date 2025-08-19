@@ -1,12 +1,15 @@
 #include "../include/deblur.h"
 #include "../include/helpers.h"
 #include "../include/metadata.h"
-#include <cstring>
+
 #include <opencv2/core/ocl.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/highgui.hpp>
+
+#include <cstring>
+#include <filesystem>
 #include <string>
 #include <unordered_map>
 
@@ -14,6 +17,7 @@
     #include "../include/debug.h"
 #endif
 
+namespace fs = std::filesystem;
 
 Deblurrer::Deblurrer(DeblurConfig &config) { this->config_ = config; }
 
@@ -129,7 +133,7 @@ std::unordered_map<std::string, std::string> Deblurrer::createTestMetadata() {
     };
 
     #ifdef DEBUG
-    std::cout << "Randomized metadata:\n";
+    std::cout << "[Info] Randomized metadata:\n";
     for (const auto& kv : metadata) {
         std::cout << "  " << kv.first << " = " << kv.second << "\n";
     }
@@ -144,16 +148,13 @@ void Deblurrer::generateTest(const std::string &testOutputPath) {
         config_.testImagePath = testOutputPath;
     }
 
-    std::string prefix = "_blurred";
-    std::string blurredImage = constructPathWithPrefix(config_.testImagePath, prefix);
-
     cv::Mat synthetic = createTestImage();
     cv::imwrite(config_.testImagePath, synthetic);
 
     std::unordered_map<std::string, std::string> metadata = createTestMetadata();
     assignMetadata(config_.testImagePath, metadata);
 
-    blurImage(config_.testImagePath, blurredImage, false);
+    blurImage(config_.testImagePath, false);
 }
 
 // Checks if image is blurred (by image matrix)
@@ -191,7 +192,7 @@ bool Deblurrer::isBlurred(const std::string &imagePath, float blurThreshold = 10
     cv::Mat image = cv::imread(imagePath);
 
     if (image.empty()) {
-        std::cerr << "[ERROR] isBlurred: Failed to load image from " << imagePath << std::endl;
+        std::cerr << "[Error] isBlurred: Failed to load image from " << imagePath << std::endl;
         return false;
     }
 
@@ -224,12 +225,12 @@ bool Deblurrer::isBlurred(const std::string &imagePath, float blurThreshold = 10
 }
 
 // Blur input image (works for both real and test-generated images)
-void Deblurrer::blurImage(const std::string &inputImagePath, const std::string &outputImagePath, bool grayscale) {
+void Deblurrer::blurImage(const std::string &inputImagePath, bool grayscale) {
     int imreadFlag = grayscale ? cv::IMREAD_GRAYSCALE : cv::IMREAD_COLOR;
 
     cv::Mat normal = cv::imread(inputImagePath, imreadFlag);
     if (normal.empty()) {
-        std::cerr << "Failed to load image: " << inputImagePath << std::endl;
+        std::cerr << "[Error] Failed to load image: " << inputImagePath << std::endl;
         return; 
     }
 
@@ -247,10 +248,17 @@ void Deblurrer::blurImage(const std::string &inputImagePath, const std::string &
     cv::Mat blurred;
     filter2D(normal, blurred, -1, psf, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
 
-    imwrite(outputImagePath, blurred);
-    copyMetadata(inputImagePath, outputImagePath);
+    std::string prefix = "_blurred";
+    std::string blurredImagePath = constructPathWithPrefix(inputImagePath, prefix);
+    if (!config_.targetDir.empty()) {
+        if (!fs::exists(config_.targetDir)) fs::create_directories(config_.targetDir);
+        blurredImagePath = constructPathWithNewDir(blurredImagePath, config_.targetDir);
+    }
 
-    std::cout << "Blurred image saved to: " << outputImagePath << "\n";
+    imwrite(blurredImagePath, blurred);
+    copyMetadata(inputImagePath, blurredImagePath);
+
+    std::cout << "[Info] Blurred image saved to: " << blurredImagePath << "\n";
 }
 
 
@@ -369,9 +377,7 @@ float Deblurrer::findBlurLength(const std::string &imagePath, float &blurAngleRa
 
     int blurLength = static_cast<int>(blur / gsd); // px
 
-    #ifdef DEBUG
-        std::cout << "[Info] Current blur length estimated: " << blur << " mm " << "(" << blurLength << " px)" << std::endl; 
-    #endif
+    std::cout << "[Info] Current blur length estimated: " << blur << " mm " << "(" << blurLength << " px)" << std::endl; 
 
     return std::max(1, blurLength); // px
 }
@@ -382,7 +388,7 @@ cv::Mat Deblurrer::normalizePSF(const cv::Mat& psf) {
 
     float normSum = cv::sum(psf)[0];
     if (normSum <= 1e-6) {
-        std::cerr << "[ERROR] PSF generation failed — normalization invalid.\n";
+        std::cerr << "[Error] PSF generation failed — normalization invalid.\n";
         normPSF.setTo(0);
         return normPSF;
     }
@@ -431,7 +437,7 @@ float Deblurrer::calculateGSD(float altitude, float focalLength, int imageWidth,
     float gsd = std::max(gsdWidth, gsdHeight); // mm/px
 
     #ifdef DEBUG
-        std::cout << "GSD: Calculated GSD = " << gsd << " mm/px\n";
+        std::cout << "[Info] GSD: Calculated GSD = " << gsd << " mm/px\n";
         std::cout << "  Focal Length: " << focalLength << " mm\n";
         std::cout << "  Sensor Size: " << sensorWidth << "x" << sensorHeight << " mm\n";
         std::cout << "  Image Resolution: " << imageWidth << "x" << imageHeight << " px\n";
@@ -515,7 +521,7 @@ cv::Mat Deblurrer::padInput(const cv::Mat& input, const cv::Mat& psf) {
 
 void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv::Mat& output, float snr) {
     if (input.empty() || psf.empty()) {
-        std::cerr << "[ERROR] Input or PSF is empty.\n";
+        std::cerr << "[Error] Input or PSF is empty.\n";
         return;
     }
 
@@ -683,183 +689,6 @@ std::vector<cv::Mat> Deblurrer::deconvolve(const std::vector<cv::Mat>& inputChan
     return outputChannels;
 }
 
-// EXPERIMENTAL
-cv::Mat estimateGhostMask(const cv::Mat& input, const cv::Mat& psf, float blurThreshold = 0.5f) {
-    cv::Mat gray;
-    if (input.channels() == 3)
-        cv::cvtColor(input, gray, cv::COLOR_BGR2GRAY);
-    else
-        gray = input.clone();
-    gray.convertTo(gray, CV_32F, 1.0 / 255.0);
-
-    // Estimate blur direction from PSF
-    cv::Moments m = cv::moments(psf, true);
-    double cx = psf.cols / 2.0;
-    double cy = psf.rows / 2.0;
-    double dx = (m.m10 / m.m00) - cx;
-    double dy = (m.m01 / m.m00) - cy;
-
-    if (std::abs(dx) + std::abs(dy) < 1e-3) {
-        dx = 1.0; dy = 0.0;
-    }
-
-    // Build directional filter (Sobel-like)
-    cv::Point2f dir(dx, dy);
-    float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
-    dir *= 1.0f / len;
-
-    cv::Mat gradX, gradY;
-    cv::Sobel(gray, gradX, CV_32F, 1, 0, 3);
-    cv::Sobel(gray, gradY, CV_32F, 0, 1, 3);
-
-    cv::Mat proj = gradX * dir.x + gradY * dir.y;
-    cv::Mat energy = proj.mul(proj);
-
-    // Smooth and threshold
-    cv::GaussianBlur(energy, energy, cv::Size(11, 11), 5);
-    double maxVal;
-    cv::minMaxLoc(energy, nullptr, &maxVal);
-
-    cv::Mat mask;
-    cv::threshold(energy, mask, blurThreshold * maxVal, 1.0, cv::THRESH_BINARY);
-
-    #ifdef DEBLUR_DEBUG
-        visualizeMatrix(mask, "ghosting_mask.png");
-    #endif
-
-    return mask;
-}
-
-cv::Mat estimateGhostMaskHF(const cv::Mat& deblurred) {
-    cv::Mat gray, blurred, lap1, lap2, diff;
-    cv::cvtColor(deblurred, gray, cv::COLOR_BGR2GRAY);
-    gray.convertTo(gray, CV_32F, 1/255.0f);
-
-    cv::GaussianBlur(gray, blurred, cv::Size(0,0), 2.0);
-    cv::Laplacian(gray, lap1, CV_32F, 3);
-    cv::Laplacian(blurred, lap2, CV_32F, 3);
-    diff = cv::abs(lap1 - lap2);
-
-    cv::normalize(diff, diff, 0, 1, cv::NORM_MINMAX);
-    cv::GaussianBlur(diff, diff, cv::Size(15,15), 5);
-    
-    #ifdef DEBLUR_DEBUG
-        visualizeMatrix(diff, "ghosting_mask_hf.png");
-    #endif
-
-    return diff;  // soft ghostiness map [0..1]
-}
-
-cv::Mat estimateGhostMaskDirectional(const cv::Mat& deblurred, const cv::Mat& psf) {
-    cv::Mat gray; 
-    cv::cvtColor(deblurred, gray, cv::COLOR_BGR2GRAY); 
-    gray.convertTo(gray, CV_32F, 1 / 255.0f);
-
-    cv::Mat gx, gy;
-    cv::Sobel(gray, gx, CV_32F, 1, 0), cv::Sobel(gray, gy, CV_32F, 0, 1);
-
-    cv::Moments m = cv::moments(psf, true);
-    double cx = psf.cols / 2.0, cy = psf.rows / 2.0;
-    double dx = (m.m10 / m.m00) - cx, dy = (m.m01 / m.m00) - cy;
-
-    if (fabs(dx) + fabs(dy) < 1e-3) dx=1, dy=0;
-
-    cv::Point2f dir(dx, dy);
-    dir *= (1 / std::sqrt(dx * dx + dy * dy));
-
-    cv::Mat proj = gx * dir.x + gy * dir.y;
-    cv::Mat energy = proj.mul(proj);
-    cv::GaussianBlur(energy, energy, cv::Size(13,13), 4);
-    cv::normalize(energy, energy, 0, 1, cv::NORM_MINMAX);
-
-    return energy;
-}
-
-cv::Mat fuseGhostMasks(const cv::Mat& m1, const cv::Mat& m2) {
-    cv::Mat fuse = cv::max(m1, m2);
-    cv::GaussianBlur(fuse, fuse, cv::Size(15,15), 5);
-    return fuse;
-}
-
-cv::Mat smoothGhostRegions(const cv::Mat& input, const cv::Mat& ghostMask, float strength = 0.7f) {
-    cv::Mat inputF;
-    input.convertTo(inputF, CV_32F, 1 / 255.0f);
-
-    cv::Mat smooth;
-    cv::edgePreservingFilter(inputF, smooth, cv::RECURS_FILTER, 60, 0.7f);
-
-    std::vector<cv::Mat> inCh, smCh, outCh;
-    cv::split(inputF, inCh);
-    cv::split(smooth, smCh);
-
-    cv::Mat ghostF;
-    ghostMask.convertTo(ghostF, CV_32F, 1.0 / 255.0);
-
-    for (int i = 0; i < inCh.size(); ++i) {
-        cv::Mat w2, w1;
-
-        // w2 = strength * ghostF
-        cv::multiply(ghostF, strength, w2, 1.0, CV_32F);
-
-        // w1 = 1.0 - w2
-        cv::subtract(1.0f, w2, w1, cv::noArray(), CV_32F);
-
-        cv::Mat a, b, blended;
-        cv::multiply(inCh[i], w1, a, 1.0, CV_32F);
-        cv::multiply(smCh[i], w2, b, 1.0, CV_32F);
-        cv::add(a, b, blended, cv::noArray(), CV_32F);
-
-        outCh.push_back(blended);
-    }
-
-    cv::Mat outF;
-    cv::merge(outCh, outF);
-    cv::min(outF, 1.0f, outF);
-    cv::max(outF, 0.0f, outF);
-
-    cv::Mat output;
-    outF.convertTo(output, CV_8U, 255.0f);
-
-    return output;
-}
-
-void Deblurrer::suppressGhosting(const cv::Mat& deblurred, const cv::Mat& psf, const cv::Mat& original, cv::Mat& output) {
-    CV_Assert(deblurred.size() == original.size() && deblurred.type() == original.type());
-    std::cout << "[Info] Start suppressing ghosting artifacts.\n";
-
-    cv::Mat mHF = estimateGhostMaskHF(deblurred);
-    cv::Mat mDir = estimateGhostMaskDirectional(deblurred, psf);
-    cv::Mat ghostMask = fuseGhostMasks(mHF, mDir);
-
-    cv::threshold(ghostMask, ghostMask, 0.2f, 1.0f, cv::THRESH_TOZERO);
-    cv::normalize(ghostMask, ghostMask, 0, 1, cv::NORM_MINMAX);
-
-    cv::Mat cleaned = smoothGhostRegions(deblurred, ghostMask, 0.7f);
-
-    cv::Mat deblurF, origF, maskCh;
-    deblurred.convertTo(deblurF, CV_32F, 1 / 255.0f);
-    original.convertTo(origF, CV_32F, 1 / 255.0f);
-
-    std::vector<cv::Mat> masks(deblurred.channels(), ghostMask);
-    cv::merge(masks, maskCh);
-
-    cv::Mat invMaskCh;
-    cv::subtract(1.0f, maskCh, invMaskCh, cv::noArray(), CV_32F);
-
-    cv::Mat cleanedF;
-    cleaned.convertTo(cleanedF, CV_32F, 1.0 / 255.0);
-
-    cv::Mat part1 = cleanedF.mul(maskCh);
-    cv::Mat part2 = deblurF.mul(invMaskCh);
-    cv::Mat outF = part1 + part2;
-
-    cv::min(outF, 1.0f, outF);
-    cv::max(outF, 0.0f, outF);
-    outF.convertTo(output, CV_8U, 255.0f);
-
-    std::cout << "[Info] Finish suppressing ghosting artifacts.\n";
-}
-
 void Deblurrer::denoiseImage(cv::Mat& image, float strength = 10.0f, float edgeStrength = 0.4f) {
     if (image.empty()) {
         std::cerr << "[Error] Denoise input image is empty." << std::endl;
@@ -882,10 +711,10 @@ void Deblurrer::denoiseImage(cv::Mat& image, float strength = 10.0f, float edgeS
     }
 }
 
-void Deblurrer::deblurImage(const std::string &inputImagePath, const std::string &outputImagePath, float snr = 500.0) {
+void Deblurrer::deblurImage(const std::string &inputImagePath, float snr = 1500.0) {
     cv::Mat blurred = cv::imread(inputImagePath);
     if (blurred.empty()) {
-        std::cerr << "Failed to load image: " << inputImagePath << std::endl;
+        std::cerr << "[Error] Failed to load image: " << inputImagePath << std::endl;
         return;
     }
 
@@ -907,7 +736,6 @@ void Deblurrer::deblurImage(const std::string &inputImagePath, const std::string
 
     cv::Mat output;
     output = deblurred.clone();
-    //suppressGhosting(deblurred, psf, blurred, output); // does not work as expected
 
     if (config_.denoise) {
         if (!output.empty()) {
@@ -918,8 +746,15 @@ void Deblurrer::deblurImage(const std::string &inputImagePath, const std::string
         }
     }
 
-    cv::imwrite(outputImagePath, output);
-    copyMetadata(inputImagePath, outputImagePath);
+    std::string prefix = "_deblurred";
+    std::string deblurredImagePath = constructPathWithPrefix(inputImagePath, prefix);
+    if (!config_.targetDir.empty()) {
+        if (!fs::exists(config_.targetDir)) fs::create_directories(config_.targetDir);
+        deblurredImagePath = constructPathWithNewDir(deblurredImagePath, config_.targetDir);
+    }
 
-    std::cout << "Deblurred image saved to: " << outputImagePath << "\n";
+    cv::imwrite(deblurredImagePath, output);
+    copyMetadata(inputImagePath, deblurredImagePath);
+
+    std::cout << "[Info] Deblurred image saved to: " << deblurredImagePath << "\n";
 }

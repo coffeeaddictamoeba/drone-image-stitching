@@ -13,10 +13,9 @@ class Deblurrer {
         ~Deblurrer() = default;
 
         void generateTest(const std::string &testOutputPath = "");
-        void blurImage(const std::string &inputImagePath, const std::string &outputImagePath, bool grayscale);
-        void deblurImage(const std::string &inputImagePath, const std::string &outputImagePath, float snr);
+        void blurImage(const std::string &inputImagePath, bool grayscale);
+        void deblurImage(const std::string &inputImagePath, float snr);
         bool isBlurred(const std::string &imagePath, float blurThreshold);
-        void testPSF(const std::string &inputImagePath);
     
     private:
         // For arguments handling
@@ -29,9 +28,7 @@ class Deblurrer {
         void estimatePSF(int blurLengthPx, float blurAngleRad, cv::Mat &syntheticPSF);
         void wienerDeconvolution(const cv::Mat& blurred, const cv::Mat& psf, cv::Mat& outputImage, float snr);
         void denoiseImage(cv::Mat& image, float strength, float edgeStrength);
-        void recoverBrightness(cv::Mat& image, float gamma);
         bool isBlurred(const cv::Mat &image, float blurThreshold);
-        void suppressGhosting(const cv::Mat& deblurred, const cv::Mat& psf, const cv::Mat& original, cv::Mat& output);
 
         // Deblur helpers
         cv::Mat padInput(const cv::Mat& input, const cv::Mat& psf);

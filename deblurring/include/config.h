@@ -7,6 +7,8 @@
 struct DeblurConfig {
     std::string testImagePath = "synthetic.jpg";
     std::string originalImagePath = "";
+    std::string sourceDir = "";
+    std::string targetDir = "";
     
     float snr = 1500.0;
     float blurThreshold = 100.0;
@@ -17,6 +19,7 @@ struct DeblurConfig {
     bool blur = false;
     bool denoise = false;
     bool forceDeblurring = false;
+    bool monitorDir = false;
 };
 
 #endif
