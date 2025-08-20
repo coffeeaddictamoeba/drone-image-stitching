@@ -6,6 +6,12 @@
 #include <exception>
 #include <string>
 
+#define RESET   "\033[0m"
+#define RED     "\033[31m"      // Errors
+#define YELLOW  "\033[33m"      // Warnings
+#define GREEN   "\033[32m"      // Success
+
+
 DeblurConfig config;
 
 void parseArgs(int argc, char* argv[]) {
@@ -95,7 +101,7 @@ int main(int argc, char** argv) {
             deblurrer.deblurImage(blurredImage, config.snr);
             return 0;
         } catch (std::exception &e) {
-            std::cerr << "Error: " << e.what() << "\n";
+            std::cerr << RED <<"Error: " << e.what() << RESET << "\n";
             return 1;
         }
     }

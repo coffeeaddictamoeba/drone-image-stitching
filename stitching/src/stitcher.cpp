@@ -2,6 +2,11 @@
 #include <iostream>
 #include <gdal/gdal_version.h>
 
+#define RESET   "\033[0m"
+#define RED     "\033[31m"      // Errors
+#define YELLOW  "\033[33m"      // Warnings
+#define GREEN   "\033[32m"      // Success
+
 // Initialize static member
 MosaicStitcher* MosaicStitcher::instance_ = nullptr;
 
@@ -43,7 +48,7 @@ void MosaicStitcher::parseArgs(int argc, char* argv[]) {
         else if (arg == "--alpha-threshold" && i + 1 < argc)
             config_.alphaValidationThreshold = std::stod(argv[++i]);
         else {
-            std::cerr << "Unknown or incomplete argument: " << arg << std::endl;
+            std::cerr << RED << "Unknown or incomplete argument: " << arg << RESET << std::endl;
             std::exit(1);
         }
     }
@@ -61,7 +66,7 @@ void MosaicStitcher::cleanupGDAL() {
 
 void MosaicStitcher::signalHandler(int signum) {
     if (instance_) {
-        std::cout << "\n[INFO] SIGINT (" << signum << ") received. Initiating graceful shutdown..." << std::endl;
+        std::cout << YELLOW << "\n[INFO] SIGINT (" << signum << ") received. Initiating graceful shutdown..." << RESET << std::endl;
         instance_->stopSignal_ = true;
         instance_->queueCV_.notify_all();
     }

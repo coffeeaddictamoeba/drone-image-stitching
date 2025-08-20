@@ -17,6 +17,13 @@
     #include "../include/debug.h"
 #endif
 
+#define RESET   "\033[0m"
+#define RED     "\033[31m"      // Errors
+#define YELLOW  "\033[33m"      // Warnings
+#define GREEN   "\033[32m"      // Success
+
+
+
 namespace fs = std::filesystem;
 
 Deblurrer::Deblurrer(DeblurConfig &config) { this->config_ = config; }
@@ -200,7 +207,7 @@ bool Deblurrer::isBlurred(const std::string &imagePath, float blurThreshold = 10
     cv::Mat image = cv::imread(imagePath);
 
     if (image.empty()) {
-        std::cerr << "[Error] isBlurred: Failed to load image from " << imagePath << std::endl;
+        std::cerr << RED << "[Error] isBlurred: Failed to load image from " << imagePath << RESET << std::endl;
         return false;
     }
 
@@ -238,7 +245,7 @@ void Deblurrer::blurImage(const std::string &inputImagePath, bool grayscale) {
 
     cv::Mat normal = cv::imread(inputImagePath, imreadFlag);
     if (normal.empty()) {
-        std::cerr << "[Error] Failed to load image: " << inputImagePath << std::endl;
+        std::cerr << RED << "[Error] Failed to load image: " << inputImagePath << RESET << std::endl;
         return; 
     }
 
@@ -315,9 +322,9 @@ void Deblurrer::findSpeedFromMetadata(std::unordered_map<std::string, std::strin
                       << "    - Roll: " << roll << " deg\n";
         #endif
     } else {
-        std::cout << "[Warn] Cannot find sufficient 3D Speed parameters. Using GPS Speed.\n";
+        std::cout << YELLOW << "[Warn] Cannot find sufficient 3D Speed parameters. Using GPS Speed." << RESET << "\n";
         if (!metadata.count("GPS Speed") || !metadata.count("GPS Speed Ref")) {
-            throw std::runtime_error("Missing GPSSpeed or GPSSpeedRef for 2D speed fallback.");
+            std::cerr << RED << "[Error] Missing GPSSpeed or GPSSpeedRef for 2D speed fallback." << RESET << std::endl;
         }
         speedX = parseExifGPSSpeed(metadata["GPS Speed"], metadata["GPS Speed Ref"]);
         speedY = speedZ = 0.0f;
@@ -384,7 +391,7 @@ cv::Mat Deblurrer::normalizePSF(const cv::Mat& psf) {
 
     float normSum = cv::sum(psf)[0];
     if (normSum <= 1e-6) {
-        std::cerr << "[Error] PSF generation failed — normalization invalid.\n";
+        std::cerr << RED << "[Error] PSF generation failed — normalization invalid." << RESET << "\n";
         normPSF.setTo(0);
         return normPSF;
     }
@@ -517,7 +524,7 @@ cv::Mat Deblurrer::padInput(const cv::Mat& input, const cv::Mat& psf) {
 
 void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv::Mat& output, float snr) {
     if (input.empty() || psf.empty()) {
-        std::cerr << "[Error] Input or PSF is empty.\n";
+        std::cerr << RED << "[Error] Input or PSF is empty." << RESET << std::endl;
         return;
     }
 
@@ -687,7 +694,7 @@ std::vector<cv::Mat> Deblurrer::deconvolve(const std::vector<cv::Mat>& inputChan
 
 void Deblurrer::denoiseImage(cv::Mat& image, float strength = 10.0f, float edgeStrength = 0.4f) {
     if (image.empty()) {
-        std::cerr << "[Error] Denoise input image is empty." << std::endl;
+        std::cerr << RED << "[Error] Denoise input image is empty." << RESET << std::endl;
         return;
     }
 
@@ -710,7 +717,7 @@ void Deblurrer::denoiseImage(cv::Mat& image, float strength = 10.0f, float edgeS
 void Deblurrer::deblurImage(const std::string &inputImagePath, float snr = 1500.0) {
     cv::Mat blurred = cv::imread(inputImagePath);
     if (blurred.empty()) {
-        std::cerr << "[Error] Failed to load image: " << inputImagePath << std::endl;
+        std::cerr << RED << "[Error] Failed to load image: " << inputImagePath << RESET << std::endl;
         return;
     }
 
@@ -725,7 +732,7 @@ void Deblurrer::deblurImage(const std::string &inputImagePath, float snr = 1500.
     float blurLength = findBlurLength(inputImagePath, blurAngleRad);
 
     if (!blurLength) {
-        std::cerr << "[Error] Failed to estimate blur length." << std::endl;
+        std::cerr << RED << "[Error] Failed to estimate blur length." << RESET << std::endl;
         return;
     }
 
@@ -740,7 +747,7 @@ void Deblurrer::deblurImage(const std::string &inputImagePath, float snr = 1500.
             std::cout << "[Info] Applying post-deconvolution denoising.\n";
             denoiseImage(deblurred);
         } else {
-            std::cerr << "[Warn] Output image is empty. Skipping denoising and recovery step.\n";
+            std::cerr << YELLOW << "[Warn] Output image is empty. Skipping denoising and recovery step." << RESET << std::endl;
         }
     }
 

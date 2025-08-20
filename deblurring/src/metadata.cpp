@@ -16,6 +16,11 @@
 #define pclose _pclose
 #endif
 
+#define RESET   "\033[0m"
+#define RED     "\033[31m"      // Errors
+#define YELLOW  "\033[33m"      // Warnings
+#define GREEN   "\033[32m"      // Success
+
 bool isExifToolAvailable() {
 #ifdef _WIN32
     const char* cmd = "where exiftool >nul 2>&1";
@@ -45,7 +50,7 @@ struct PipeCloser {
 std::unordered_map<std::string, std::string> extractImageMetadata(const std::string& imagePath) {
     std::unordered_map<std::string, std::string> metadata;
     if (!isExifToolAvailable()) {
-        std::cerr << "ExifTool not found in PATH.\n";
+        std::cerr << RED << "ExifTool not found in PATH." << RESET << "\n";
         return metadata;
     }
 
@@ -106,7 +111,7 @@ std::string extractExifTagValue(const std::string& imagePath, const std::string&
 
 void copyMetadata(const std::string& sourceImagePath, const std::string& destImagePath, const std::unordered_map<std::string, std::string>& customTags) {
     if (!isExifToolAvailable()) {
-        std::cerr << "ExifTool not found.\n";
+        std::cerr << RED << "ExifTool not found." << RESET << "\n";
         return;
     }
 
@@ -138,13 +143,13 @@ void copyMetadata(const std::string& sourceImagePath, const std::string& destIma
 
     cmdStream << " \"" << destImagePath << "\"";
     if (runExifToolCommand(cmdStream.str()) != 0) {
-        std::cerr << "Failed to copy metadata with ExifTool.\n";
+        std::cerr << RED << "Failed to copy metadata with ExifTool." << RESET << std::endl;
     }
 }
 
 void assignMetadata(const std::string& imagePath, const std::unordered_map<std::string, std::string>& tags) {
     if (!isExifToolAvailable()) {
-        std::cerr << "ExifTool not found.\n";
+        std::cerr << RED << "ExifTool not found." << RESET << "\n";
         return;
     }
 
@@ -182,7 +187,7 @@ void assignMetadata(const std::string& imagePath, const std::unordered_map<std::
     cmdStream << " \"" << imagePath << "\"";
 
     if (runExifToolCommand(cmdStream.str()) != 0) {
-        std::cerr << "Failed to assign metadata.\n";
+        std::cerr << RED << "Failed to assign metadata." << RESET << "\n";
     }
 }
 
@@ -206,13 +211,13 @@ float parseExifGPSSpeed(const std::string &gpsspeed_str, const std::string &gpss
     } else if (gpsspeedref_str == "mph") {
         return speed * 1609.34f / 3600.0f;
     } else {
-        std::cout << "[Warn] GPS speed assumed in m/s: " << speed << "\n";
+        std::cout << YELLOW << "[Warn] GPS speed assumed in m/s: " << speed << RESET <<"\n";
         return speed;
     }
 }
 
 void listMetadata() {
-    std::cerr << "[Error] Image requires essential metadata listed below:\n"
+    std::cerr << RED << "[Error] Image requires essential metadata listed below:\n"
                 << "    - Flight Yaw Degree\n"
                 << "    - Flight Pitch Degree\n"
                 << "    - Flight Roll Degree\n"
@@ -225,5 +230,5 @@ void listMetadata() {
                 << " If you are using 3D speed parameters, check:\n"
                 << "    - Flight X Speed\n" 
                 << "    - Flight Y Speed\n" 
-                << "    - Flight Z Speed" << std::endl;
+                << "    - Flight Z Speed" << RESET << std::endl;
 }

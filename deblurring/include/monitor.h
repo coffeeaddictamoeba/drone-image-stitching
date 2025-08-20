@@ -6,11 +6,16 @@
 #include <functional>
 #include <atomic>
 
+#define RESET   "\033[0m"
+#define RED     "\033[31m"      // Errors
+#define YELLOW  "\033[33m"      // Warnings
+#define GREEN   "\033[32m"      // Success
+
 namespace fs = std::filesystem;
 
 std::atomic<bool> stopFlag{false}; // ^C handler
 void signalHandler(int) {
-    std::cout << "\n[Info] Stopping monitor..." << std::endl;
+    std::cout << YELLOW << "\n[Info] Stopping monitor..." << RESET << std::endl;
     stopFlag = true;
 }
 
@@ -62,7 +67,7 @@ class DirectoryMonitor {
                             std::string absPath = fs::absolute(filePath).string();
         
                             if (seenFiles_.insert(absPath).second) {
-                                std::cout << "[Monitor] New file detected: " << absPath << std::endl;
+                                std::cout << YELLOW << "[Monitor] New file detected: " << absPath << RESET << std::endl;
                                 callback_(absPath);
                             }
                         }

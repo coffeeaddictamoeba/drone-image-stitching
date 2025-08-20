@@ -2,16 +2,8 @@
 #include <algorithm>
 #include <thread>
 
-FolderWatcher::FolderWatcher(const Config& config_ref,
-                             std::queue<BatchTask>& batch_queue,
-                             std::mutex& queue_mutex,
-                             std::condition_variable& queue_cv,
-                             std::atomic<bool>& stop_signal)
-    : config_(config_ref),
-      batchQueue_(batch_queue),
-      queueMutex_(queue_mutex),
-      queueCV_(queue_cv),
-      stopSignal_(stop_signal) {
+FolderWatcher::FolderWatcher(const Config& config_ref, std::queue<BatchTask>& batch_queue, std::mutex& queue_mutex, std::condition_variable& queue_cv, std::atomic<bool>& stop_signal)
+    : config_(config_ref), batchQueue_(batch_queue), queueMutex_(queue_mutex), queueCV_(queue_cv), stopSignal_(stop_signal) {
     fs::create_directories(config_.incomingDir);
 }
 

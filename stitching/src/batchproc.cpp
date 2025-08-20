@@ -4,16 +4,13 @@
 #include <cmath>
 #include <fstream>
 
-BatchProcessor::BatchProcessor(const Config& config_ref,
-                               std::queue<BatchTask>& batch_queue,
-                               std::mutex& queue_mutex,
-                               std::condition_variable& queue_cv,
-                               std::atomic<bool>& stop_signal)
-    : config_(config_ref),
-      batchQueue_(batch_queue),
-      queueMutex_(queue_mutex),
-      queueCV_(queue_cv),
-      stopSignal_(stop_signal) {
+#define RESET   "\033[0m"
+#define RED     "\033[31m"      // Errors
+#define YELLOW  "\033[33m"      // Warnings
+#define GREEN   "\033[32m"      // Success
+
+BatchProcessor::BatchProcessor(const Config& config_ref, std::queue<BatchTask>& batch_queue, std::mutex& queue_mutex, std::condition_variable& queue_cv, std::atomic<bool>& stop_signal)
+    : config_(config_ref), batchQueue_(batch_queue), queueMutex_(queue_mutex), queueCV_(queue_cv), stopSignal_(stop_signal) {
     fs::create_directories(BATCHES_DIR);
     fs::create_directories(fs::path(STITCHED_FILE).parent_path());
 }
@@ -37,7 +34,7 @@ void BatchProcessor::processBatchesLoop() {
         if (runOdmBatchSuccessful(batch_path, ortho_path)) {
             mergeWithOTB(ortho_path);
         } else {
-            std::cerr << "[FATAL] Batch failed after " << config_.retries << " retries: " << batch_path << std::endl;
+            std::cerr << RED << "[FATAL] Batch failed after " << config_.retries << " retries: " << batch_path << RESET << std::endl;
         }
 
         for (const auto& entry : fs::directory_iterator(batch_path)) {
@@ -49,7 +46,7 @@ void BatchProcessor::processBatchesLoop() {
                 fs::remove_all(entry.path());
                 std::cout << "[DEBUG] Removed: " << entry.path() << std::endl;
             } catch (const fs::filesystem_error& e) {
-                std::cerr << "[WARNING] Failed to remove " << entry.path() << ": " << e.what() << std::endl;
+                std::cerr << RED <<"[WARNING] Failed to remove " << entry.path() << ": " << e.what() << RESET << std::endl;
             }
         }
     }
@@ -68,7 +65,7 @@ fs::path BatchProcessor::createBatchDirectory(const std::vector<fs::path>& image
         try {
             fs::rename(img, images_path / img.filename());
         } catch (const fs::filesystem_error& e) {
-            std::cerr << "[ERROR] Failed to move image " << img << " to batch " << images_path << ": " << e.what() << std::endl;
+            std::cerr << RED << "[ERROR] Failed to move image " << img << " to batch " << images_path << ": " << e.what() << RESET << std::endl;
         }
     }
     return batch_root_path;
@@ -113,20 +110,20 @@ bool BatchProcessor::runOdmBatchInternal(const fs::path& batch_path) {
 bool BatchProcessor::validateGeotiff(const fs::path& path) {
     GDALDatasetRAII dataset((GDALDataset*)GDALOpen(path.string().c_str(), GA_ReadOnly));
     if (!dataset) {
-        std::cerr << "[ERROR] GDAL failed to open image: " << path << std::endl;
+        std::cerr << RED << "[ERROR] GDAL failed to open image: " << path << RESET << std::endl;
         return false;
     }
 
     int width = dataset->GetRasterXSize();
     int height = dataset->GetRasterYSize();
     if (width == 0 || height == 0) {
-        std::cerr << "[ERROR] Invalid image dimensions: " << path << std::endl;
+        std::cerr << RED << "[ERROR] Invalid image dimensions: " << path << RESET << std::endl;
         return false;
     }
 
     int bandCount = dataset->GetRasterCount();
     if (bandCount < 3) {
-        std::cerr << "[ERROR] Not enough bands (RGB expected): " << path << std::endl;
+        std::cerr << RED << "[ERROR] Not enough bands (RGB expected): " << path << RESET << std::endl;
         return false;
     }
 
@@ -143,7 +140,7 @@ bool BatchProcessor::validateGeotiff(const fs::path& path) {
         if (!band || band->RasterIO(GF_Read, xOff, yOff, winX, winY,
                            buffer.data(), winX, winY, GDT_Float32,
                            0, 0) != CE_None) {
-            std::cerr << "[ERROR] Failed to read band " << i << " of image: " << path << std::endl;
+            std::cerr << RED << "[ERROR] Failed to read band " << i << " of image: " << path << RESET << std::endl;
             return false;
         }
 
@@ -166,7 +163,7 @@ bool BatchProcessor::validateGeotiff(const fs::path& path) {
         if (!alphaBand || alphaBand->RasterIO(GF_Read, xOff, yOff, winX, winY,
                                 buffer.data(), winX, winY, GDT_Float32,
                                 0, 0) != CE_None) {
-            std::cerr << "[WARN] Could not read alpha band — skipping transparency check." << std::endl;
+            std::cerr << RED << "[WARN] Could not read alpha band — skipping transparency check." << RESET << std::endl;
         } else {
             int visiblePixels = std::count_if(buffer.begin(), buffer.end(), [](float v) {
                 return v > 10.0f; // Check if more than 10% of image is transparent
@@ -179,16 +176,16 @@ bool BatchProcessor::validateGeotiff(const fs::path& path) {
     }
 
     if (!rgbValid && !alphaValid) {
-        std::cerr << "[ERROR] Rejected: low RGB variance and mostly transparent: " << path << std::endl;
+        std::cerr << RED << "[ERROR] Rejected: low RGB variance and mostly transparent: " << path << RESET << std::endl;
         return false;
     }
 
     if (!rgbValid) {
-        std::cerr << "[WARN] Low RGB variance (stddev=" << totalStdDev << "): " << path << std::endl;
+        std::cerr << YELLOW << "[WARN] Low RGB variance (stddev=" << totalStdDev << "): " << path << RESET << std::endl;
     }
 
     if (!alphaValid) {
-        std::cerr << "[WARN] Alpha band mostly transparent in central region: " << path << std::endl;
+        std::cerr << YELLOW << "[WARN] Alpha band mostly transparent in central region: " << path << RESET << std::endl;
     }
 
     return true;
@@ -197,18 +194,18 @@ bool BatchProcessor::validateGeotiff(const fs::path& path) {
 bool BatchProcessor::getRasterInfo(const fs::path& path, double gt[6], std::optional<std::string>& proj_wkt, int& width, int& height) {
     GDALDatasetRAII dataset((GDALDataset*)GDALOpen(path.string().c_str(), GA_ReadOnly));
     if (!dataset) {
-        std::cerr << "[ERROR] Could not open raster: " << path << std::endl;
+        std::cerr << RED << "[ERROR] Could not open raster: " << path << RESET << std::endl;
         return false;
     }
 
     if (dataset->GetGeoTransform(gt) != CE_None) {
-        std::cerr << "[ERROR] Could not get geotransform for: " << path << std::endl;
+        std::cerr << RED << "[ERROR] Could not get geotransform for: " << path << RESET << std::endl;
         return false;
     }
 
     const char* pszWKT = dataset->GetProjectionRef();
     if (pszWKT == nullptr || std::string(pszWKT).empty()) {
-        std::cerr << "[WARNING] No projection found for: " << path << std::endl;
+        std::cerr << RED << "[WARNING] No projection found for: " << path << RESET << std::endl;
         proj_wkt = std::nullopt;
     } else {
         proj_wkt = std::string(pszWKT); // Directly convert to std::string
@@ -266,7 +263,7 @@ void BatchProcessor::mergeWithOTB(const fs::path& ortho_path) {
             std::cout << "[INFO] Mosaic initialized with: " << STITCHED_FILE << "\n";
             return;
         } catch (const fs::filesystem_error& e) {
-            std::cerr << "[ERROR] Failed to initialize mosaic: " << e.what() << std::endl;
+            std::cerr << RED << "[ERROR] Failed to initialize mosaic: " << e.what() << RESET << std::endl;
             return;
         }
     }
@@ -277,7 +274,7 @@ void BatchProcessor::mergeWithOTB(const fs::path& ortho_path) {
             fs::copy_file(STITCHED_FILE, bak_path, fs::copy_options::overwrite_existing);
             std::cout << "[DEBUG] Previous mosaic backed up to: " << bak_path << std::endl;
         } catch (const fs::filesystem_error& e) {
-            std::cerr << "[WARN] Failed to backup previous mosaic: " << e.what() << std::endl;
+            std::cerr << RED << "[WARN] Failed to backup previous mosaic: " << e.what() << RESET << std::endl;
         }
     }
 
@@ -285,7 +282,7 @@ void BatchProcessor::mergeWithOTB(const fs::path& ortho_path) {
     std::optional<std::string> mosaic_proj_wkt_opt;
     int mosaic_width, mosaic_height;
     if (!getRasterInfo(STITCHED_FILE, mosaic_gt, mosaic_proj_wkt_opt, mosaic_width, mosaic_height)) {
-        std::cerr << "[ERROR] Could not get info for existing mosaic: " << STITCHED_FILE << std::endl;
+        std::cerr << RED << "[ERROR] Could not get info for existing mosaic: " << STITCHED_FILE << RESET << std::endl;
         return;
     }
 
@@ -293,12 +290,12 @@ void BatchProcessor::mergeWithOTB(const fs::path& ortho_path) {
     std::optional<std::string> new_ortho_proj_wkt_opt;
     int new_ortho_width, new_ortho_height;
     if (!getRasterInfo(ortho_path, new_ortho_gt, new_ortho_proj_wkt_opt, new_ortho_width, new_ortho_height)) {
-        std::cerr << "[ERROR] Could not get info for new orthophoto: " << ortho_path << std::endl;
+        std::cerr << RED << "[ERROR] Could not get info for new orthophoto: " << ortho_path << RESET << std::endl;
         return;
     }
 
     if (!mosaic_proj_wkt_opt.has_value() || mosaic_proj_wkt_opt->empty()) {
-        std::cerr << "[ERROR] Mosaic has no projection, cannot proceed with gdalwarp for growth.\n";
+        std::cerr << RED << "[ERROR] Mosaic has no projection, cannot proceed with gdalwarp for growth." << RESET << "\n";
         return;
     }
 
@@ -316,7 +313,7 @@ void BatchProcessor::mergeWithOTB(const fs::path& ortho_path) {
     {
         std::ofstream wkt_file(mosaic_wkt_tmp_file.get_path());
         if (!wkt_file.is_open()) {
-            std::cerr << "[ERROR] Could not create temporary WKT file: " << mosaic_wkt_tmp_file.get_path() << std::endl;
+            std::cerr << RED << "[ERROR] Could not create temporary WKT file: " << mosaic_wkt_tmp_file.get_path() << RESET << std::endl;
             return;
         }
         wkt_file << *mosaic_proj_wkt_opt;
@@ -343,7 +340,7 @@ void BatchProcessor::mergeWithOTB(const fs::path& ortho_path) {
                      << "\"" << new_ortho_warped_expanded.get_path().string() << "\" ";
 
         if (runCommand(gdalwarp_cmd.str()) != 0) {
-            std::cerr << "[ERROR] gdalwarp failed to align and expand new orthophoto. Cannot grow mosaic.\n";
+            std::cerr << RED << "[ERROR] gdalwarp failed to align and expand new orthophoto. Cannot grow mosaic." << RESET << "\n";
             return;
         }
         std::cout << "[INFO] New orthophoto warped and expanded to: " << new_ortho_warped_expanded.get_path() << std::endl;
@@ -367,7 +364,7 @@ void BatchProcessor::mergeWithOTB(const fs::path& ortho_path) {
 
         std::cout << "[DEBUG] OTB Mosaic Command: " << mosaic_cmd.str() << std::endl;
         if (runCommand(mosaic_cmd.str()) != 0) {
-            std::cerr << "[ERROR] otbcli_Mosaic failed. Command: " << mosaic_cmd.str() << std::endl;
+            std::cerr << RED << "[ERROR] otbcli_Mosaic failed. Command: " << mosaic_cmd.str() << RESET << std::endl;
             return;
         }
     }
@@ -387,12 +384,12 @@ void BatchProcessor::mergeWithOTB(const fs::path& ortho_path) {
                  << "-co \"BLOCKYSIZE=" << config_.blockSize << "\" ";
 
         if (runCommand(gdal_translate_cmd.str()) != 0) {
-            std::cerr << "[ERROR] gdal_translate failed to optimize output mosaic. Proceeding with unoptimized file.\n";
+            std::cerr << RED << "[ERROR] gdal_translate failed to optimize output mosaic. Proceeding with unoptimized file." << RESET << "\n";
             try { // If optimization fails, try to use the unoptimized file
                 fs::rename(tmp_mosaic_unoptimized.release(), STITCHED_FILE);
-                std::cout << "[INFO] Successfully updated stitched orthomosaic (unoptimized) at: " << STITCHED_FILE << std::endl;
+                std::cout << "[INFO] Successfully updated stitched orthomosaic (unoptimized) at: " << STITCHED_FILE<< std::endl;
             } catch (const fs::filesystem_error& e) {
-                std::cerr << "[ERROR] Failed to replace stitched file with unoptimized version: " << e.what() << std::endl;
+                std::cerr << RED << "[ERROR] Failed to replace stitched file with unoptimized version: " << e.what() << RESET << std::endl;
             }
             return;
         }
@@ -400,9 +397,9 @@ void BatchProcessor::mergeWithOTB(const fs::path& ortho_path) {
 
     try {
         fs::rename(tmp_mosaic_optimized.release(), STITCHED_FILE);
-        std::cout << "[INFO] Successfully updated stitched orthomosaic at: " << STITCHED_FILE << std::endl;
+        std::cout << GREEN << "[INFO] Successfully updated stitched orthomosaic at: " << STITCHED_FILE << RESET << std::endl;
     } catch (const fs::filesystem_error& e) {
-        std::cerr << "[ERROR] Failed to replace stitched file: " << e.what() << std::endl;
+        std::cerr << RED <<"[ERROR] Failed to replace stitched file: " << e.what() << RESET << std::endl;
         return;
     }
 }
@@ -419,24 +416,24 @@ bool BatchProcessor::runOdmBatchSuccessful(const fs::path& batch_path, const fs:
         if (runOdmBatchInternal(batch_path)) {
             if (!fs::exists(ortho_path)) {
                 result = OdmRunResult::OrthophotoNotFound;
-                std::cerr << "[ERROR] Orthophoto not found after ODM run: " << ortho_path << std::endl;
+                std::cerr << RED << "[ERROR] Orthophoto not found after ODM run: " << ortho_path << RESET << std::endl;
             } else {
                 try {
                     auto file_size = fs::file_size(ortho_path);
                     if (file_size == 0) {
                         result = OdmRunResult::OrthophotoZeroBytes;
-                        std::cerr << "[ERROR] Orthophoto is 0 bytes: " << ortho_path << std::endl;
+                        std::cerr << RED << "[ERROR] Orthophoto is 0 bytes: " << ortho_path << RESET << std::endl;
                     } else {
                         if (!validateGeotiff(ortho_path)) {
                             result = OdmRunResult::ValidationFailed;
-                            std::cerr << "[ERROR] Orthophoto failed GDAL validation: " << ortho_path << std::endl;
+                            std::cerr << RED << "[ERROR] Orthophoto failed GDAL validation: " << ortho_path << RESET << std::endl;
                         } else {
                             result = OdmRunResult::Success;
                         }
                     }
                 } catch (const fs::filesystem_error& e) {
                     result = OdmRunResult::OrthophotoNotFound;
-                    std::cerr << "[ERROR] Failed to get file size for " << ortho_path << ": " << e.what() << std::endl;
+                    std::cerr << RED << "[ERROR] Failed to get file size for " << ortho_path << ": " << e.what() << RESET << std::endl;
                 }
             }
         } else {
@@ -444,7 +441,7 @@ bool BatchProcessor::runOdmBatchSuccessful(const fs::path& batch_path, const fs:
         }
 
         if (result == OdmRunResult::Success) {
-            std::cout << "[INFO] Orthophoto passed validation: " << ortho_path << std::endl;
+            std::cout << GREEN << "[INFO] Orthophoto passed validation: " << ortho_path << RESET << std::endl;
             return true;
         } else {
             std::string err_message;
@@ -472,7 +469,7 @@ bool BatchProcessor::runOdmBatchSuccessful(const fs::path& batch_path, const fs:
                     std::cout << "[DEBUG] Cleaned partial ODM output for retry: " << (batch_path / "odm_orthophoto") << std::endl;
                 }
             } catch (const fs::filesystem_error& e) {
-                std::cerr << "[WARN] Failed to clean partial ODM output for retry: " << e.what() << std::endl;
+                std::cerr << RED << "[ERROR] Failed to clean partial ODM output for retry: " << e.what() << RESET << std::endl;
             }
 
             ++retryCount;
