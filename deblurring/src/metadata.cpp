@@ -210,3 +210,20 @@ float parseExifGPSSpeed(const std::string &gpsspeed_str, const std::string &gpss
         return speed;
     }
 }
+
+void listMetadata() {
+    std::cerr << "[Error] Image requires essential metadata listed below:\n"
+                << "    - Flight Yaw Degree\n"
+                << "    - Flight Pitch Degree\n"
+                << "    - Flight Roll Degree\n"
+                << "    - GPS Altitude\n"
+                << "    - Exposure Time\n"
+                << " If you are using overall speed parameters, check:\n"
+                << "    - GPS Speed\n"
+                << "    - GPS Speed Ref\n"
+                << "    - GPS Img Direction\n"
+                << " If you are using 3D speed parameters, check:\n"
+                << "    - Flight X Speed\n" 
+                << "    - Flight Y Speed\n" 
+                << "    - Flight Z Speed" << std::endl;
+}

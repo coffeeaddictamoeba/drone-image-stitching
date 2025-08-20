@@ -16,6 +16,7 @@ class Deblurrer {
         void blurImage(const std::string &inputImagePath, bool grayscale);
         void deblurImage(const std::string &inputImagePath, float snr);
         bool isBlurred(const std::string &imagePath, float blurThreshold);
+        void saveImage(const cv::Mat &image, const std::string &inputImagePath, const std::string &prefix);
     
     private:
         // For arguments handling
@@ -29,6 +30,13 @@ class Deblurrer {
         void wienerDeconvolution(const cv::Mat& blurred, const cv::Mat& psf, cv::Mat& outputImage, float snr);
         void denoiseImage(cv::Mat& image, float strength, float edgeStrength);
         bool isBlurred(const cv::Mat &image, float blurThreshold);
+
+        // Metadata reading helpers
+        void findPitchRollYawFromMetadata(std::unordered_map<std::string, std::string> &metadata, float &pitchRad, float &rollRad, float &yawRad);
+        void findSpeedFromMetadata(std::unordered_map<std::string, std::string> &metadata, float &speedX, float &speedY, float &speedZ);
+        void findVBodies(std::unordered_map<std::string, std::string> &metadata, float &Vx, float &Vy, float &Vz, float &speed);
+        float findGSDFromMetadata(std::unordered_map<std::string, std::string> &metadata);
+        float findGPSImgDirectionFromMetadata(std::unordered_map<std::string, std::string> &metadata);
 
         // Deblur helpers
         cv::Mat padInput(const cv::Mat& input, const cv::Mat& psf);
