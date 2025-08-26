@@ -43,3 +43,6 @@ batches/
 # testing
 results/
 tests/
+
+# detection models
+models/

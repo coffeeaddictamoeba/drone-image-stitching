@@ -7,13 +7,13 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GDAL REQUIRED gdal)
 
 file(GLOB_RECURSE STITCHING_SRC CONFIGURE_DEPENDS "src/*.cpp")
-add_executable(stitching_exec ${STITCHING_SRC})
+add_executable(stitcher ${STITCHING_SRC})
 
-target_include_directories(stitching_exec PRIVATE
+target_include_directories(stitcher PRIVATE
     include
     ${GDAL_INCLUDE_DIRS}
 )
 
-target_link_libraries(stitching_exec PRIVATE
+target_link_libraries(stitcher PRIVATE
     ${GDAL_LIBRARIES}
 )
