@@ -25,7 +25,7 @@ class Deblurrer {
         // For actual deblurring
         float findBlurLength(const std::string &imagePath, float &blurAngleRad);
         float calculateGSD(float altitude, float focalLength, int imageWidth, int imageHeight, float sensorWidth, float sensorHeight);
-        void fftShift(cv::Mat& input);
+        void fftShift(cv::UMat& input);
         void estimatePSF(int blurLengthPx, float blurAngleRad, cv::Mat &syntheticPSF);
         void wienerDeconvolution(const cv::Mat& blurred, const cv::Mat& psf, cv::Mat& outputImage, float snr);
         void denoiseImage(cv::Mat& image, float strength, float edgeStrength);
@@ -39,10 +39,10 @@ class Deblurrer {
         float findGPSImgDirectionFromMetadata(std::unordered_map<std::string, std::string> &metadata);
 
         // Deblur helpers
-        cv::Mat padInput(const cv::Mat& input, const cv::Mat& psf);
+        cv::UMat padInput(const cv::Mat& input, const cv::Mat& psf);
         cv::Mat normalizePSF(const cv::Mat& psf);
-        cv::Mat psfdft(const cv::Mat& normPSF, cv::Size targetSize);
-        std::pair<cv::Mat, cv::Mat> psfConjMag(const cv::Mat& psfDFT);
+        cv::UMat psfdft(const cv::Mat& normPSF, cv::Size targetSize);
+        std::pair<cv::UMat, cv::UMat> psfConjMag(const cv::UMat& psfDFT);
         cv::Mat createSNRMap(cv::Size size, const cv::Mat& psf);
         cv::Mat buildWienerDenominator(const cv::Mat& psfMag2, const cv::Mat& snrMap, float snr, const cv::Mat& inputF, const cv::Mat& psf);
         std::vector<cv::Mat> splitInputChannels(const cv::Mat& inputF);
@@ -52,4 +52,5 @@ class Deblurrer {
         // For testing purposes
         cv::Mat createTestImage(int width, int height);
         std::unordered_map<std::string, std::string> createTestMetadata();
+        void nothing();
     };

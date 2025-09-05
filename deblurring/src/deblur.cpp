@@ -174,14 +174,14 @@ void Deblurrer::generateTest(const std::string &testOutputPath) {
 
 // Checks if image is blurred (by image matrix)
 bool Deblurrer::isBlurred(const cv::Mat &image, float blurThreshold = 100.0f) {
-    cv::Mat grayImage;
+    cv::UMat grayImage;
     if (image.channels() == 3) {
         cv::cvtColor(image, grayImage, cv::COLOR_BGR2GRAY);
     } else {
-        grayImage = image.clone();
+        image.copyTo(grayImage);
     }
 
-    cv::Mat laplacianImage;
+    cv::UMat laplacianImage;
     cv::Laplacian(grayImage, laplacianImage, CV_64F);
 
     cv::Scalar mean, stdDev;
@@ -467,52 +467,60 @@ cv::Mat createHannWindow2D(int rows, int cols) {
     return hannY * hannX;  // outer product to form 2D window
 }
 
-void Deblurrer::fftShift(cv::Mat& input) {
+void Deblurrer::fftShift(cv::UMat& input) {
     input = input(cv::Rect(0, 0, input.cols & -2, input.rows & -2));  // make even size
     int cx = input.cols / 2;
     int cy = input.rows / 2;
 
-    cv::Mat q0(input, cv::Rect(0, 0, cx, cy));   // top-left
-    cv::Mat q1(input, cv::Rect(cx, 0, cx, cy));  // top-right
-    cv::Mat q2(input, cv::Rect(0, cy, cx, cy));  // bottom-left
-    cv::Mat q3(input, cv::Rect(cx, cy, cx, cy)); // bottom-right
+    cv::UMat q0(input, cv::Rect(0, 0, cx, cy));   // top-left
+    cv::UMat q1(input, cv::Rect(cx, 0, cx, cy));  // top-right
+    cv::UMat q2(input, cv::Rect(0, cy, cx, cy));  // bottom-left
+    cv::UMat q3(input, cv::Rect(cx, cy, cx, cy)); // bottom-right
 
-    cv::Mat tmp;
+    cv::UMat tmp;
     q0.copyTo(tmp);  q3.copyTo(q0);  tmp.copyTo(q3);
     q1.copyTo(tmp);  q2.copyTo(q1);  tmp.copyTo(q2);
 }
 
-cv::Mat Deblurrer::psfdft(const cv::Mat& normPSF, cv::Size targetSize) {
-    cv::Mat paddedPSF = cv::Mat::zeros(targetSize, CV_32F);
+cv::UMat Deblurrer::psfdft(const cv::Mat& normPSF, cv::Size targetSize) {
+    cv::UMat paddedPSF(targetSize, CV_32F);
+    paddedPSF.setTo(0);
+
     int cx = (paddedPSF.cols - normPSF.cols) / 2;
     int cy = (paddedPSF.rows - normPSF.rows) / 2;
+
     normPSF.copyTo(paddedPSF(cv::Rect(cx, cy, normPSF.cols, normPSF.rows)));
 
     fftShift(paddedPSF); // As PSF is generated at the center of image, FFT Shift moves it to (0,0) for DFT
     
-    cv::Mat psfDFT;
+    cv::UMat psfDFT;
     cv::dft(paddedPSF, psfDFT, cv::DFT_COMPLEX_OUTPUT);
     return psfDFT;
 }
 
-std::pair<cv::Mat, cv::Mat> Deblurrer::psfConjMag(const cv::Mat& psfDFT) {
-    std::vector<cv::Mat> psfPlanes(2);
+std::pair<cv::UMat, cv::UMat> Deblurrer::psfConjMag(const cv::UMat& psfDFT) {
+    std::vector<cv::UMat> psfPlanes(2);
     cv::split(psfDFT, psfPlanes);
 
-    cv::Mat psfMag2 = psfPlanes[0].mul(psfPlanes[0]) + psfPlanes[1].mul(psfPlanes[1]);
+    cv::UMat temp0, temp1, psfMag2;
+    temp0 = psfPlanes[0].mul(psfPlanes[0]);
+    temp1 = psfPlanes[1].mul(psfPlanes[1]);
+    cv::add(temp0, temp1, psfMag2);
+
     double psfMaxVal;
     cv::minMaxLoc(psfMag2, nullptr, &psfMaxVal);
-    psfMag2 /= static_cast<float>(psfMaxVal + 1e-6f);
+    cv::divide(psfMag2, static_cast<float>(psfMaxVal + 1e-6f), psfMag2);
 
-    psfPlanes[1] *= -1;  // conjugate imaginary part
-    cv::Mat psfConj;
+    psfPlanes[1] = psfPlanes[1].mul(-1);
+
+    cv::UMat psfConj;
     cv::merge(psfPlanes, psfConj);
 
     return {psfConj, psfMag2};
 }
 
-cv::Mat Deblurrer::padInput(const cv::Mat& input, const cv::Mat& psf) {
-    cv::Mat inputF;
+cv::UMat Deblurrer::padInput(const cv::Mat& input, const cv::Mat& psf) {
+    cv::UMat inputF;
     input.convertTo(inputF, CV_32F, 1.0 / 255.0);
 
     int padY = psf.rows;
@@ -530,19 +538,21 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
 
     cv::ocl::setUseOpenCL(true);
 
-    auto inputF = padInput(input, psf);
-    auto normPSF = normalizePSF(psf);
-    auto psfDFT = psfdft(normPSF, inputF.size());
+    cv::Mat normPSF = normalizePSF(psf);
+    cv::UMat inputF = padInput(input, psf);
+    cv::UMat psfDFT = psfdft(normPSF, inputF.size());
     
-    auto [psfConj, psfMag2] = psfConjMag(psfDFT);
-
-    #ifdef DEBLUR_DEBUG
-        visualizeMatrix(psfMag2, "psfMag2.png");
-        countMatrixZeros(psfMag2, "psfMag");
-    #endif
+    auto [psfConj, psfMag2] = psfConjMag(psfDFT); // <cv::UMat, cv::UMat>
 
     cv::Mat snrMap = createSNRMap(inputF.size(), psf);
-    cv::Mat wienerDenom = buildWienerDenominator(psfMag2, snrMap, snr, inputF, psf);
+    cv::Mat inputF_cpu; inputF.copyTo(inputF_cpu);          // cv::UMat -> cv::Mat
+    cv::Mat psfMag2_cpu; psfMag2.copyTo(psfMag2_cpu);       // cv::UMat -> cv::Mat
+    #ifdef DEBLUR_DEBUG
+        visualizeMatrix(psfMag2_cpu, "psfMag2.png");
+        countMatrixZeros(psfMag2_cpu, "psfMag");
+    #endif
+
+    cv::Mat wienerDenom = buildWienerDenominator(psfMag2_cpu, snrMap, snr, inputF_cpu, psf);
 
     #ifdef DEBLUR_DEBUG
         visualizeMatrix(snrMap, "snrMap.png");
@@ -550,11 +560,12 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
         countMatrixZeros(wienerDenom, "wienerDenom");
     #endif
 
-    auto inputChannels = splitInputChannels(inputF);
+    auto inputChannels = splitInputChannels(inputF_cpu);
     cv::Mat hann = createHannWindow2D(inputF.rows, inputF.cols);
     cv::Mat mask = createFeatherMask(input.size());
 
-    auto outputChannels = deconvolve(inputChannels, psfConj, wienerDenom, hann, mask, input, psf);
+    cv::Mat psfConj_cpu; psfConj.copyTo(psfConj_cpu);
+    auto outputChannels = deconvolve(inputChannels, psfConj_cpu, wienerDenom, hann, mask, input, psf);
 
     if (outputChannels.size() == 1)
         output = outputChannels[0];
@@ -571,15 +582,18 @@ cv::Mat Deblurrer::createSNRMap(cv::Size size, const cv::Mat& psf) {
     float blurLength = std::sqrt(psf.cols * psf.cols + psf.rows * psf.rows);
     float minFactor = std::clamp(0.7f - 0.015f * blurLength, 0.3f, 0.7f);
 
-    for (int y = 0; y < snrMap.rows; ++y) {
-        for (int x = 0; x < snrMap.cols; ++x) {
-            float dx = x - center.x;
-            float dy = y - center.y;
-            float dist = std::sqrt(dx * dx + dy * dy) / maxDist;
-            float weight = std::cos(dist * CV_PI / 2.0f);
-            snrMap.at<float>(y, x) = minFactor + (1.0f - minFactor) * weight;
+    cv::parallel_for_(cv::Range(0, snrMap.rows), [&](const cv::Range& range) {
+        for (int y = range.start; y < range.end; ++y) {
+            float* rowPtr = snrMap.ptr<float>(y);
+            for (int x = 0; x < snrMap.cols; ++x) {
+                float dx = x - center.x;
+                float dy = y - center.y;
+                float dist = std::sqrt(dx * dx + dy * dy) / maxDist;
+                float weight = std::cos(dist * CV_PI / 2.0f);
+                rowPtr[x] = minFactor + (1.0f - minFactor) * weight;
+            }
         }
-    }
+    });
 
     return snrMap;
 }
@@ -597,15 +611,18 @@ cv::Mat Deblurrer::buildWienerDenominator(const cv::Mat& psfMag2, const cv::Mat&
     cv::Mat freqSuppression(inputF.size(), CV_32F, 1.0f);
     float maxFreq = std::sqrt(center.x * center.x + center.y * center.y);
 
-    for (int y = 0; y < inputF.rows; ++y) {
-        for (int x = 0; x < inputF.cols; ++x) {
-            float dx = x - center.x;
-            float dy = y - center.y;
-            float dot = (dx * blurVec.x + dy * blurVec.y) / maxFreq;
-            float angleFactor = 1.0f - 0.25f * std::abs(dot / maxFreq);
-            freqSuppression.at<float>(y, x) = std::clamp(angleFactor, 0.7f, 1.0f);
+    cv::parallel_for_(cv::Range(0, inputF.rows), [&](const cv::Range& range) {
+        for (int y = range.start; y < range.end; ++y) {
+            float* rowPtr = freqSuppression.ptr<float>(y);
+            for (int x = 0; x < inputF.cols; ++x) {
+                float dx = x - center.x;
+                float dy = y - center.y;
+                float dot = (dx * blurVec.x + dy * blurVec.y) / maxFreq;
+                float angleFactor = 1.0f - 0.25f * std::abs(dot / maxFreq);
+                rowPtr[x] = std::clamp(angleFactor, 0.7f, 1.0f);
+            }
         }
-    }
+    });
 
     wienerDenom /= freqSuppression;
 
