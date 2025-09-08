@@ -1,4 +1,12 @@
 #include "../include/batchproc.h"
+
+#ifndef _WIN32
+    #include <sys/types.h>
+    #include <sys/wait.h>
+    #include <unistd.h>
+    #include <signal.h>
+#endif
+
 #include <thread>
 #include <algorithm>
 #include <cmath>
@@ -20,7 +28,13 @@ void BatchProcessor::processBatchesLoop() {
         std::unique_lock<std::mutex> lock(queueMutex_);
         queueCV_.wait(lock, [this] { return !batchQueue_.empty() || stopSignal_.load(); });
 
-        if (stopSignal_ && batchQueue_.empty()) break;
+        if (stopSignal_.load()) {
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            batchQueue_ = {}; // clear remaining tasks
+            break;
+        }
+        
+        if (batchQueue_.empty()) continue;
 
         BatchTask task = batchQueue_.front();
         batchQueue_.pop();
@@ -49,6 +63,7 @@ void BatchProcessor::processBatchesLoop() {
                 std::cerr << RED <<"[WARNING] Failed to remove " << entry.path() << ": " << e.what() << RESET << std::endl;
             }
         }
+        if (stopSignal_.load()) break;
     }
     std::cout << "[INFO] BatchProcessor loop stopped." << std::endl;
 }
@@ -72,8 +87,22 @@ fs::path BatchProcessor::createBatchDirectory(const std::vector<fs::path>& image
 }
 
 int BatchProcessor::runCommand(const std::string& cmd) {
-    std::cout << "[CMD] Running: " << cmd << std::endl;
-    return std::system(cmd.c_str());
+    if (stopSignal_.load()) return 1;
+
+    #ifndef _WIN32
+        pid_t pid = fork();
+        if (pid == 0) { execl("/bin/sh", "sh", "-c", cmd.c_str(), nullptr); _exit(127); }
+        int status;
+        while (true) {
+            pid_t w = waitpid(pid, &status, WNOHANG);
+            if (w == pid) break; // finished
+            if (stopSignal_.load()) { kill(pid, SIGINT); waitpid(pid, &status, 0); break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    #else
+        return std::system(cmd.c_str());
+    #endif
 }
 
 bool BatchProcessor::runOdmBatchInternal(const fs::path& batch_path) {
@@ -90,8 +119,6 @@ bool BatchProcessor::runOdmBatchInternal(const fs::path& batch_path) {
                         "--project-path /datasets project "
                         "--fast-orthophoto --skip-3dmodel";
     #else
-        #include <unistd.h>
-
         std::string uid = std::to_string(getuid());
         std::string gid = std::to_string(getgid());
 
@@ -410,6 +437,8 @@ bool BatchProcessor::runOdmBatchSuccessful(const fs::path& batch_path, const fs:
 
     while (retryCount < effectiveRetries && !stopSignal_) {
         std::cout << "[INFO] Processing batch (attempt #" << retryCount + 1 << " of " << effectiveRetries << "): " << batch_path << std::endl;
+
+        if (stopSignal_.load()) break;
 
         OdmRunResult result = OdmRunResult::CommandFailed;
 
