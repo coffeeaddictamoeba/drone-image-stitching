@@ -1,5 +1,4 @@
 #include <iostream>
-#include <regex>
 #include <sstream>
 #include <unordered_map>
 #include <vector>
@@ -31,12 +30,13 @@ bool isExifToolAvailable() {
 }
 
 int runExifToolCommand(const std::string& cmd) {
-#ifdef _WIN32
-    std::string fullCmd = cmd + " >nul 2>&1";
-#else
-    std::string fullCmd = cmd + " >/dev/null 2>&1";
-#endif
-    return system(fullCmd.c_str());
+    return system((cmd + 
+        #ifdef _WIN32
+                " >nul 2>&1"
+        #else
+                " >/dev/null 2>&1"
+        #endif
+    ).c_str());
 }
 
 struct PipeCloser {
@@ -61,24 +61,31 @@ std::unordered_map<std::string, std::string> extractImageMetadata(const std::str
     }
 
     std::array<char, 512> buffer;
-    std::regex kvRegex(R"(^\s*([^:]+?)\s*:\s*(.*)\s*$)");
-    std::smatch match;
-
     while (fgets(buffer.data(), buffer.size(), pipe.get())) {
         std::string line = trim(buffer.data());
-        if (std::regex_match(line, match, kvRegex)) {
-            std::string key = match[1].str();
-            std::string value = match[2].str();
+        auto colonPos = line.find(':');
+        if (colonPos != std::string::npos) {
+            std::string key = trim(line.substr(0, colonPos));
+            std::string value = trim(line.substr(colonPos + 1));
             metadata[key] = value;
-
+    
             if (key == "User Comment") {
-                std::regex innerRegex(R"(([^=,]+)=([^=,]+))");
-                for (auto it = std::sregex_iterator(value.begin(), value.end(), innerRegex); it != std::sregex_iterator(); ++it) {
-                    metadata[(*it)[1].str()] = (*it)[2].str();
+                size_t start = 0;
+                while (start < value.size()) {
+                    auto commaPos = value.find(',', start);
+                    auto eqPos = value.find('=', start);
+                    if (eqPos != std::string::npos && (commaPos == std::string::npos || eqPos < commaPos)) {
+                        std::string uKey = value.substr(start, eqPos - start);
+                        std::string uVal = (commaPos != std::string::npos) 
+                            ? value.substr(eqPos + 1, commaPos - eqPos - 1) 
+                            : value.substr(eqPos + 1);
+                        metadata[uKey] = uVal;
+                        start = (commaPos != std::string::npos) ? commaPos + 1 : value.size();
+                    } else break;
                 }
             }
         }
-    }
+    }    
     pclose(pipe.release());
     return metadata;
 }
