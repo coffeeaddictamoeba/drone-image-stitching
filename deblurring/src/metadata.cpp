@@ -1,13 +1,13 @@
 #include <iostream>
 #include <sstream>
 #include <unordered_map>
-#include <vector>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <array>
 #include <memory>
 #include "../include/helpers.h"
+#include "../include/metadata.h"
 
 #ifdef _WIN32
 #include <process.h>
@@ -27,6 +27,39 @@ bool isExifToolAvailable() {
     const char* cmd = "command -v exiftool >/dev/null 2>&1";
 #endif
     return (system(cmd) == 0);
+}
+
+const bool EXIFTOOL_IS_AVAILABLE = isExifToolAvailable();
+
+// NOTE: this list is a metadata minimum required for deblurring/image stitching
+constexpr const std::array<std::string_view, 23> EXIFTOOL_TAGS = {
+    "CameraModelName", 
+    "Make", 
+    "Software", 
+    "ModifyDate", 
+    "ExposureTime", 
+    "ISO",
+    "DateTimeOriginal", 
+    "CreateDate", 
+    "FocalLength",
+    "GPSVersionID", 
+    "GPSLatitude", 
+    "GPSLongitude", 
+    "GPSAltitude",
+    "GPSImgDirection", 
+    "GPSImgDirectionRef", 
+    "GPSSpeed", 
+    "GPSSpeedRef",
+    "FlightPitchDegree", 
+    "FlightYawDegree", 
+    "FlightRollDegree",
+    "XMP-drone-dji:FlightXSpeed", 
+    "XMP-drone-dji:FlightYSpeed", 
+    "XMP-drone-dji:FlightZSpeed"
+};
+
+bool isAllowedTag(std::string_view tag) {
+    return std::find(EXIFTOOL_TAGS.begin(), EXIFTOOL_TAGS.end(), tag) != EXIFTOOL_TAGS.end();
 }
 
 int runExifToolCommand(const std::string& cmd) {
@@ -49,7 +82,7 @@ struct PipeCloser {
 
 std::unordered_map<std::string, std::string> extractImageMetadata(const std::string& imagePath) {
     std::unordered_map<std::string, std::string> metadata;
-    if (!isExifToolAvailable()) {
+    if (!EXIFTOOL_IS_AVAILABLE) {
         std::cerr << RED << "ExifTool not found in PATH." << RESET << "\n";
         return metadata;
     }
@@ -60,7 +93,7 @@ std::unordered_map<std::string, std::string> extractImageMetadata(const std::str
         throw std::runtime_error("Failed to run exiftool command: " + cmd);
     }
 
-    std::array<char, 512> buffer;
+    std::array<char, 1024> buffer;
     while (fgets(buffer.data(), buffer.size(), pipe.get())) {
         std::string line = trim(buffer.data());
         auto colonPos = line.find(':');
@@ -68,22 +101,6 @@ std::unordered_map<std::string, std::string> extractImageMetadata(const std::str
             std::string key = trim(line.substr(0, colonPos));
             std::string value = trim(line.substr(colonPos + 1));
             metadata[key] = value;
-    
-            if (key == "User Comment") {
-                size_t start = 0;
-                while (start < value.size()) {
-                    auto commaPos = value.find(',', start);
-                    auto eqPos = value.find('=', start);
-                    if (eqPos != std::string::npos && (commaPos == std::string::npos || eqPos < commaPos)) {
-                        std::string uKey = value.substr(start, eqPos - start);
-                        std::string uVal = (commaPos != std::string::npos) 
-                            ? value.substr(eqPos + 1, commaPos - eqPos - 1) 
-                            : value.substr(eqPos + 1);
-                        metadata[uKey] = uVal;
-                        start = (commaPos != std::string::npos) ? commaPos + 1 : value.size();
-                    } else break;
-                }
-            }
         }
     }    
     pclose(pipe.release());
@@ -91,7 +108,7 @@ std::unordered_map<std::string, std::string> extractImageMetadata(const std::str
 }
 
 std::string extractExifTagValue(const std::string& imagePath, const std::string& tagName) {
-    if (!isExifToolAvailable()) {
+    if (!EXIFTOOL_IS_AVAILABLE) {
         throw std::runtime_error("ExifTool not found in PATH or not executable.");
     }
 
@@ -102,7 +119,7 @@ std::string extractExifTagValue(const std::string& imagePath, const std::string&
         throw std::runtime_error("Failed to run exiftool command: " + cmd);
     }
 
-    std::array<char, 512> buffer;
+    std::array<char, 1024> buffer;
     std::string value;
 
     if (fgets(buffer.data(), buffer.size(), pipe.get())) {
@@ -116,8 +133,9 @@ std::string extractExifTagValue(const std::string& imagePath, const std::string&
     return value;
 }
 
-void copyMetadata(const std::string& sourceImagePath, const std::string& destImagePath, const std::unordered_map<std::string, std::string>& customTags) {
-    if (!isExifToolAvailable()) {
+// assigns metadata to an image from other image's metadata
+void copyMetadata(const std::string& sourceImagePath, const std::string& destImagePath) {
+    if (!EXIFTOOL_IS_AVAILABLE) {
         std::cerr << RED << "ExifTool not found." << RESET << "\n";
         return;
     }
@@ -125,28 +143,13 @@ void copyMetadata(const std::string& sourceImagePath, const std::string& destIma
     std::ostringstream cmdStream;
     cmdStream << "exiftool -overwrite_original -tagsFromFile \"" << sourceImagePath << "\"";
 
-    std::vector<std::string> tagsToCopy = {
-        "-CameraModelName", "-Make", "-Software", "-ModifyDate", "-ExposureTime", "-ISO",
-        "-DateTimeOriginal", "-CreateDate", "-FocalLength",
-        "-GPSVersionID", "-GPSLatitude", "-GPSLongitude", "-GPSAltitude", "-GPSImgDirection",
-        "-GPSSpeed", "-GPSSpeedRef", "-FlightPitchDegree", "-FlightYawDegree", "-FlightRollDegree",
-        "-XMP-drone-dji:FlightXSpeed", "-XMP-drone-dji:FlightYSpeed", "-XMP-drone-dji:FlightZSpeed"
-    };
-
-    for (const auto& tag : tagsToCopy) {
-        cmdStream << " " << tag;
+    for (const auto& tag : EXIFTOOL_TAGS) {
+        cmdStream << " -" << tag; // may be optimized?
     }
 
-    if (!customTags.empty()) {
-        cmdStream << " -UserComment=\"";
-        bool first = true;
-        for (const auto& [key, value] : customTags) {
-            if (!first) cmdStream << ",";
-            cmdStream << key << "=" << value;
-            first = false;
-        }
-        cmdStream << "\"";
-    }
+    #ifdef DEBUG
+        std::cout << "[DEBUG] Running ExifTool command: " << cmdStream.str() << "\n";
+    #endif
 
     cmdStream << " \"" << destImagePath << "\"";
     if (runExifToolCommand(cmdStream.str()) != 0) {
@@ -154,8 +157,9 @@ void copyMetadata(const std::string& sourceImagePath, const std::string& destIma
     }
 }
 
+// assigns metadata to an image from list of tags
 void assignMetadata(const std::string& imagePath, const std::unordered_map<std::string, std::string>& tags) {
-    if (!isExifToolAvailable()) {
+    if (!EXIFTOOL_IS_AVAILABLE) {
         std::cerr << RED << "ExifTool not found." << RESET << "\n";
         return;
     }
@@ -163,35 +167,20 @@ void assignMetadata(const std::string& imagePath, const std::unordered_map<std::
     std::ostringstream cmdStream;
     cmdStream << "exiftool -overwrite_original";
 
-    std::vector<std::string> standardTags = {
-        "GPSAltitude", "FocalLength", "GPSLatitude", "GPSLongitude", "GPSImgDirection",
-        "GPSSpeed", "GPSSpeedRef", "ExposureTime", "ISO", "CreateDate", 
-        "DateTimeOriginal", "Make", "Model", "FlightPitchDegree", "FlightYawDegree", 
-        "FlightRollDegree", "XMP-drone-dji:FlightXSpeed", "XMP-drone-dji:FlightYSpeed", "XMP-drone-dji:FlightZSpeed"
-    };
-
-    std::vector<std::string> userCommentParts;
     for (const auto& [key, value] : tags) {
         std::string strippedKey;
         for (char ch : key) if (ch != ' ') strippedKey += ch;
-
-        if (std::find(standardTags.begin(), standardTags.end(), strippedKey) != standardTags.end()) {
+    
+        if (isAllowedTag(strippedKey)) {
             cmdStream << " -" << strippedKey << "=\"" << value << "\"";
-        } else {
-            userCommentParts.emplace_back(key + "=" + value);
         }
-    }
-
-    if (!userCommentParts.empty()) {
-        cmdStream << " -UserComment=\"";
-        for (size_t i = 0; i < userCommentParts.size(); ++i) {
-            if (i > 0) cmdStream << ",";
-            cmdStream << userCommentParts[i];
-        }
-        cmdStream << "\"";
-    }
+    }    
 
     cmdStream << " \"" << imagePath << "\"";
+
+    #ifdef DEBUG
+        std::cout << "[DEBUG] Running ExifTool command: " << cmdStream.str() << "\n";
+    #endif
 
     if (runExifToolCommand(cmdStream.str()) != 0) {
         std::cerr << RED << "Failed to assign metadata." << RESET << "\n";
