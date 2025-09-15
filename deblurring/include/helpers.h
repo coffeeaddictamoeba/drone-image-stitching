@@ -37,13 +37,21 @@ inline std::string constructPathWithNewDir(const std::string &originalPath, cons
     return newDirPath + filename;
 }
 
-inline std::string trim(const std::string& str) {
-    size_t first = str.find_first_not_of(" \t\n\r\f\v");
-    if (std::string::npos == first) {
-        return str;
+inline std::string trim(const std::string &s) {
+    size_t b = 0, e = s.size();
+    while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+    while (e > b && std::isspace(static_cast<unsigned char>(s[e-1]))) --e;
+    return s.substr(b, e-b);
+}
+
+inline std::string escapeQuotes(const std::string &s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '"') out += "\\\"";
+        else out += c;
     }
-    size_t last = str.find_last_not_of(" \t\n\r\f\v");
-    return str.substr(first, (last - first + 1));
+    return out;
 }
 
 #endif
