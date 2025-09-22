@@ -709,6 +709,73 @@ std::vector<cv::Mat> Deblurrer::deconvolve(const std::vector<cv::Mat>& inputChan
     return outputChannels;
 }
 
+// Possibly a solution for removing ghosting artifacts
+cv::Mat findGhostMask(const cv::Mat &deblurred, const cv::Mat &psf, int blurLength) {
+    cv::Mat gray; 
+    if (deblurred.channels() == 3) 
+        cv::cvtColor(deblurred, gray, cv::COLOR_BGR2GRAY); 
+    else gray = deblurred.clone(); 
+    gray.convertTo(gray, CV_32F, 1.0 / 255.0); 
+
+    cv::Mat gray8u; gray.convertTo(gray8u, CV_8U, 255.0); 
+    cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8)); 
+    cv::Mat enhanced; 
+    clahe->apply(gray8u, enhanced); 
+    enhanced.convertTo(enhanced, CV_32F, 1.0 / 255.0); 
+
+    cv::Moments m = cv::moments(psf, true); 
+    double angle = 0.0; 
+    
+    if (m.mu20 + m.mu02 != 0) angle = 0.5 * atan2(2 * m.mu11, m.mu20 - m.mu02); // radians 
+
+    cv::Point2f shift(std::cos(angle), std::sin(angle)); 
+    cv::Mat shifted = cv::Mat::zeros(enhanced.size(), CV_32F); 
+    cv::Mat M = (cv::Mat_<float>(2, 3) << 1, 0, blurLength * shift.x, 0, 1, blurLength * shift.y); 
+    cv::warpAffine(enhanced, shifted, M, enhanced.size(), cv::INTER_LINEAR, cv::BORDER_REFLECT); 
+
+    cv::Mat diff; 
+    cv::absdiff(enhanced, shifted, diff);
+    cv::Mat ghostLikelihood; ghostLikelihood = 1.0 - diff; 
+    cv::normalize(ghostLikelihood, ghostLikelihood, 0, 1, cv::NORM_MINMAX); 
+
+    cv::GaussianBlur(ghostLikelihood, ghostLikelihood, cv::Size(7, 7), 2.0); 
+    cv::Mat mask8u; cv::normalize(ghostLikelihood, ghostLikelihood, 0, 255, cv::NORM_MINMAX); 
+    ghostLikelihood.convertTo(mask8u, CV_8U); 
+    return mask8u; // PLUS ADD SUBTRACTION OF HIGH CONTRAST AREAS, THEN GREAT
+}
+
+// questionable
+cv::Mat compensateGhosting(const cv::Mat& img, const cv::Mat& ghostMask, float angleRad, int blurLength, float alpha=0.5f) {
+    cv::Mat maskF;
+    ghostMask.convertTo(maskF, CV_32F, 1.0/255.0);
+
+    cv::Mat imgf;
+    img.convertTo(imgf, CV_32F, 1.0/255.0);
+
+    // shift image along blur direction
+    cv::Point2f dir(std::cos(angleRad), std::sin(angleRad));
+    cv::Mat M = (cv::Mat_<float>(2,3) << 1, 0, blurLength*dir.x,
+                    0, 1, blurLength*dir.y);
+    cv::Mat shifted;
+    cv::warpAffine(imgf, shifted, M, imgf.size(), cv::INTER_LINEAR, cv::BORDER_REFLECT101);
+
+    // subtract shifted copy where ghosting detected
+    cv::Mat imgF, shiftedF;
+    img.convertTo(imgF, CV_32F);
+    shifted.convertTo(shiftedF, CV_32F);
+
+    cv::cvtColor(imgF, imgF, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(shiftedF, shiftedF, cv::COLOR_BGR2GRAY);
+    cv::Mat correctedF = imgF - alpha;
+    maskF = 1.0 - maskF;
+    cv::multiply(shiftedF, maskF, shiftedF);
+    cv::multiply(correctedF, shiftedF, correctedF);
+
+    cv::Mat corrected;
+    correctedF.convertTo(corrected, img.type());
+    return corrected;
+}
+
 void Deblurrer::denoiseImage(cv::Mat& image, float strength = 10.0f, float edgeStrength = 0.4f) {
     if (image.empty()) {
         std::cerr << RED << "[Error] Denoise input image is empty." << RESET << std::endl;
