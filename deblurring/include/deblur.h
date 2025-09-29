@@ -27,7 +27,7 @@ class Deblurrer {
         float calculateGSD(float altitude, float focalLength, int imageWidth, int imageHeight, float sensorWidth, float sensorHeight);
         void fftShift(cv::UMat& input);
         void estimatePSF(int blurLengthPx, float blurAngleRad, cv::Mat &syntheticPSF);
-        void wienerDeconvolution(const cv::Mat& blurred, const cv::Mat& psf, cv::Mat& outputImage, float snr);
+        void wienerDeconvolution(const cv::Mat& blurred, const cv::Mat& psf, cv::Mat& outputImage, float blurLength, float snr);
         void denoiseImage(cv::Mat& image, float strength, float edgeStrength);
         bool isBlurred(const cv::Mat &image, float blurThreshold);
 
@@ -52,5 +52,4 @@ class Deblurrer {
         // For testing purposes
         cv::Mat createTestImage(int width, int height);
         std::unordered_map<std::string, std::string> createTestMetadata();
-        void nothing();
     };

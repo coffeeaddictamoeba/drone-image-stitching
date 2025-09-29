@@ -530,7 +530,7 @@ cv::UMat Deblurrer::padInput(const cv::Mat& input, const cv::Mat& psf) {
     return inputF;
 }
 
-void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv::Mat& output, float snr) {
+void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv::Mat& output, float blurLength, float snr) {
     if (input.empty() || psf.empty()) {
         std::cerr << RED << "[Error] Input or PSF is empty." << RESET << std::endl;
         return;
@@ -562,7 +562,12 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
 
     auto inputChannels = splitInputChannels(inputF_cpu);
     cv::Mat hann = createHannWindow2D(inputF.rows, inputF.cols);
-    cv::Mat mask = createFeatherMask(input.size());
+    cv::Mat mask;
+    if (blurLength >= 75.0f) {
+        mask = createFeatherMask(input.size());
+    } else {
+        mask = cv::Mat(input.size(), CV_32F, 1.0f);
+    }
 
     cv::Mat psfConj_cpu; psfConj.copyTo(psfConj_cpu);
     auto outputChannels = deconvolve(inputChannels, psfConj_cpu, wienerDenom, hann, mask, input, psf);
@@ -642,6 +647,7 @@ std::vector<cv::Mat> Deblurrer::splitInputChannels(const cv::Mat& inputF) {
     return inputChannels;
 }
 
+// causes blurring of image edges to hide artifacts in case of strong blur. higly questionable, but may be useful for blurLength <= 100 px + stitching
 cv::Mat Deblurrer::createFeatherMask(cv::Size size) {
     cv::Mat mask(size, CV_32F, 1.0f);
     int feather = std::min(60, std::min(size.width, size.height) / 10);
@@ -710,7 +716,7 @@ std::vector<cv::Mat> Deblurrer::deconvolve(const std::vector<cv::Mat>& inputChan
 }
 
 // Possibly a solution for removing ghosting artifacts
-cv::Mat findGhostMask(const cv::Mat &deblurred, const cv::Mat &psf, int blurLength) {
+cv::Mat findLowContrastRegions(const cv::Mat &deblurred, const cv::Mat &psf, int blurLength) {
     cv::Mat gray; 
     if (deblurred.channels() == 3) 
         cv::cvtColor(deblurred, gray, cv::COLOR_BGR2GRAY); 
@@ -741,39 +747,31 @@ cv::Mat findGhostMask(const cv::Mat &deblurred, const cv::Mat &psf, int blurLeng
     cv::GaussianBlur(ghostLikelihood, ghostLikelihood, cv::Size(7, 7), 2.0); 
     cv::Mat mask8u; cv::normalize(ghostLikelihood, ghostLikelihood, 0, 255, cv::NORM_MINMAX); 
     ghostLikelihood.convertTo(mask8u, CV_8U); 
-    return mask8u; // PLUS ADD SUBTRACTION OF HIGH CONTRAST AREAS, THEN GREAT
+    return mask8u;
 }
 
-// questionable
-cv::Mat compensateGhosting(const cv::Mat& img, const cv::Mat& ghostMask, float angleRad, int blurLength, float alpha=0.5f) {
-    cv::Mat maskF;
-    ghostMask.convertTo(maskF, CV_32F, 1.0/255.0);
+// this part is responsible for extracting ghosting from contrast mask, needs to be improved
+cv::Mat getGhostingMask(const cv::Mat &image, const cv::Mat &lowContrastMask) {
+    cv::Mat floatImage, floatLC, gray;
+    lowContrastMask.convertTo(floatLC, CV_32F);
+    image.convertTo(floatImage, CV_32F);
 
-    cv::Mat imgf;
-    img.convertTo(imgf, CV_32F, 1.0/255.0);
+    if (floatImage.channels() != 1) {
+        cv::cvtColor(floatImage, gray, cv::COLOR_BGR2GRAY);
+    } else {
+        floatImage.copyTo(gray);
+    }
 
-    // shift image along blur direction
-    cv::Point2f dir(std::cos(angleRad), std::sin(angleRad));
-    cv::Mat M = (cv::Mat_<float>(2,3) << 1, 0, blurLength*dir.x,
-                    0, 1, blurLength*dir.y);
-    cv::Mat shifted;
-    cv::warpAffine(imgf, shifted, M, imgf.size(), cv::INTER_LINEAR, cv::BORDER_REFLECT101);
+    cv::Mat gx, gy;
+    cv::Sobel(gray, gx, CV_32F, 1, 0, 3);
+    cv::Sobel(gray, gy, CV_32F, 0, 1, 3);
 
-    // subtract shifted copy where ghosting detected
-    cv::Mat imgF, shiftedF;
-    img.convertTo(imgF, CV_32F);
-    shifted.convertTo(shiftedF, CV_32F);
+    cv::Mat mag;
+    cv::magnitude(gx, gy, mag);
 
-    cv::cvtColor(imgF, imgF, cv::COLOR_BGR2GRAY);
-    cv::cvtColor(shiftedF, shiftedF, cv::COLOR_BGR2GRAY);
-    cv::Mat correctedF = imgF - alpha;
-    maskF = 1.0 - maskF;
-    cv::multiply(shiftedF, maskF, shiftedF);
-    cv::multiply(correctedF, shiftedF, correctedF);
+    cv::Mat ghosting = floatLC - mag;
 
-    cv::Mat corrected;
-    correctedF.convertTo(corrected, img.type());
-    return corrected;
+    return ghosting;
 }
 
 void Deblurrer::denoiseImage(cv::Mat& image, float strength = 10.0f, float edgeStrength = 0.4f) {
@@ -824,7 +822,7 @@ void Deblurrer::deblurImage(const std::string &inputImagePath, float snr = 1500.
     estimatePSF(blurLength, blurAngleRad, psf);
 
     cv::Mat deblurred;
-    wienerDeconvolution(blurred, psf, deblurred, snr);
+    wienerDeconvolution(blurred, psf, deblurred, blurLength, snr);
 
     if (config_.denoise) {
         if (!deblurred.empty()) {
@@ -836,4 +834,11 @@ void Deblurrer::deblurImage(const std::string &inputImagePath, float snr = 1500.
     }
 
     saveImage(deblurred, inputImagePath, "_deblurred");
+
+    // experinmental
+    cv::Mat lowContrast = findLowContrastRegions(deblurred, psf, blurLength);
+    cv::Mat ghosting = getGhostingMask(deblurred, lowContrast);
+
+    ghosting.convertTo(ghosting, CV_8U);
+    saveImage(ghosting, inputImagePath, "_ghostmask");
 }
