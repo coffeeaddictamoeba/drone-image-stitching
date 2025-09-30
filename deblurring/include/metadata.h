@@ -128,4 +128,27 @@ std::string extractExifTagValue(const std::string& imagePath, const std::string&
 // parsing operations
 float parseExifExposureTime(const std::string &exposure_str);
 float parseExifGPSSpeed(const std::string &gpsspeed_str, const std::string &gpsspeedref_str);
+
+inline bool parseFloatFromMetadata(const std::unordered_map<std::string,std::string>& metadata, const std::string& key, float& value) {
+    auto it = metadata.find(key);
+    if (it == metadata.end()) return false;
+    try {
+        value = std::stof(it->second);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+inline bool parseIntFromMetadata(const std::unordered_map<std::string,std::string>& metadata, const std::string& key, int& value) {
+    auto it = metadata.find(key);
+    if (it == metadata.end()) return false;
+    try {
+        value = std::stoi(it->second);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 #endif

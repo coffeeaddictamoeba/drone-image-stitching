@@ -173,16 +173,24 @@ void Deblurrer::generateTest(const std::string &testOutputPath) {
 }
 
 // Checks if image is blurred (by image matrix)
-bool Deblurrer::isBlurred(const cv::Mat &image, float blurThreshold = 100.0f) {
-    cv::UMat grayImage;
-    if (image.channels() == 3) {
-        cv::cvtColor(image, grayImage, cv::COLOR_BGR2GRAY);
+bool Deblurrer::isBlurred(const cv::Mat &image, float blurThreshold = 100.0f, int maxImageSize = 1024) {
+    cv::Mat resized;
+    if (image.cols > maxImageSize || image.rows > maxImageSize) {
+        float scale = maxImageSize / float(std::max(image.cols, image.rows));
+        cv::resize(image, resized, cv::Size(), scale, scale, cv::INTER_LINEAR);
     } else {
-        image.copyTo(grayImage);
+        resized = image;
     }
 
-    cv::UMat laplacianImage;
-    cv::Laplacian(grayImage, laplacianImage, CV_64F);
+    cv::Mat grayImage;
+    if (resized.channels() == 3) {
+        cv::cvtColor(resized, grayImage, cv::COLOR_BGR2GRAY);
+    } else {
+        resized.copyTo(grayImage);
+    }
+
+    cv::Mat laplacianImage;
+    cv::Laplacian(grayImage, laplacianImage, CV_32F);
 
     cv::Scalar mean, stdDev;
     cv::meanStdDev(laplacianImage, mean, stdDev);
@@ -204,39 +212,12 @@ bool Deblurrer::isBlurred(const cv::Mat &image, float blurThreshold = 100.0f) {
 
 // Checks if image is blurred (by image path)
 bool Deblurrer::isBlurred(const std::string &imagePath, float blurThreshold = 100.0f) {
-    cv::Mat image = cv::imread(imagePath);
-
+    cv::Mat image = cv::imread(imagePath, cv::IMREAD_COLOR);
     if (image.empty()) {
-        std::cerr << RED << "[Error] isBlurred: Failed to load image from " << imagePath << RESET << std::endl;
+        std::cerr << RED << "[Error] Failed to load image from " << imagePath << RESET << std::endl;
         return false;
     }
-
-    cv::Mat grayImage;
-    if (image.channels() == 3) {
-        cv::cvtColor(image, grayImage, cv::COLOR_BGR2GRAY);
-    } else {
-        grayImage = image.clone();
-    }
-
-    cv::Mat laplacianImage;
-    cv::Laplacian(grayImage, laplacianImage, CV_64F);
-
-    cv::Scalar mean, stdDev;
-    cv::meanStdDev(laplacianImage, mean, stdDev);
-
-    double variance = stdDev.val[0] * stdDev.val[0];
-
-    #ifdef DEBUG
-        std::cout << "[Info] Blur detection: Variance of Laplacian estimated: " << variance << "\n";
-    #endif
-
-    if (variance < blurThreshold) {
-        std::cout << "[Info] Image is likely blurred." << std::endl;
-        return true;
-    } else {
-        std::cout << "[Info] Image is likely sharp." << std::endl;
-        return false;
-    }
+    return isBlurred(image, blurThreshold);
 }
 
 // Blur input image (works for both real and test-generated images)
@@ -274,6 +255,7 @@ float Deblurrer::findBlurLength(const std::string &imagePath, float &blurAngleRa
     auto metadata = extractImageMetadata(imagePath);
 
     try {
+        // Exposure Time in EXIF format most of the time looks like "1/10", so it is important to parse it properly
         float exposure = parseExifExposureTime(metadata["Exposure Time"]);
         float gsd = findGSDFromMetadata(metadata);
     
@@ -295,63 +277,92 @@ float Deblurrer::findBlurLength(const std::string &imagePath, float &blurAngleRa
 }
 
 // Finds Pitch, Roll and Yaw from metadata in radians
-void Deblurrer::findPitchRollYawFromMetadata(std::unordered_map<std::string, std::string> &metadata, float &pitchRad, float &rollRad, float &yawRad) {
-    float yaw = metadata.count("Flight Yaw Degree") ? std::stof(metadata["Flight Yaw Degree"]) : 0.0f;       // degrees
-    float pitch = metadata.count("Flight Pitch Degree") ? std::stof(metadata["Flight Pitch Degree"]) : 0.0f; // degrees
-    float roll = metadata.count("Flight Roll Degree") ? std::stof(metadata["Flight Roll Degree"]) : 0.0f;    // degrees
+void Deblurrer::findPitchRollYawFromMetadata(const std::unordered_map<std::string, std::string>& metadata, float &pitchRad, float &rollRad, float &yawRad) {
+    float yaw = 0.0f, pitch = 0.0f, roll = 0.0f;
+    parseFloatFromMetadata(metadata, "Flight Yaw Degree", yaw);
+    parseFloatFromMetadata(metadata, "Flight Pitch Degree", pitch);
+    parseFloatFromMetadata(metadata, "Flight Roll Degree", roll);
 
-    yawRad = yaw * (CV_PI / 180.0f);
-    pitchRad = pitch * (CV_PI / 180.0f);
-    rollRad = roll * (CV_PI / 180.0f);
+    yawRad = yaw * static_cast<float>(CV_PI / 180.0f);
+    pitchRad = pitch * static_cast<float>(CV_PI / 180.0f);
+    rollRad = roll * static_cast<float>(CV_PI / 180.0f);
 }
 
-// Finds Drone Speed (both 3D Speed, m/s and Overall Speed, m/s are valid)
-void Deblurrer::findSpeedFromMetadata(std::unordered_map<std::string, std::string> &metadata, float &speedX, float &speedY, float &speedZ) {
-    speedX = metadata.count("Flight X Speed") ? std::stof(metadata["Flight X Speed"]) : 0.0f; // m/s (East)
-    speedY = metadata.count("Flight Y Speed") ? std::stof(metadata["Flight Y Speed"]) : 0.0f; // m/s (North)
-    speedZ = metadata.count("Flight Z Speed") ? std::stof(metadata["Flight Z Speed"]) : 0.0f; // m/s (Down)
 
-    if ((std::abs(speedX) > 1e-6f || std::abs(speedY) > 1e-6f || std::abs(speedZ) > 1e-6f) && metadata.count("Flight X Speed") && metadata.count("Flight Y Speed") && metadata.count("Flight Z Speed")) {
-        #ifdef DEBUG
-        std::cout << "[Info] Using 3D Speed and Orientation parameters:\n"
-                      << "    - Speed X (East): " << speedX << " m/s\n"
-                      << "    - Speed Y (North): " << speedY << " m/s\n"
-                      << "    - Speed Z (Down): " << speedZ << " m/s\n"
-                      << "    - Yaw: " << yaw << " deg\n"
-                      << "    - Pitch: " << pitch << " deg\n"
-                      << "    - Roll: " << roll << " deg\n";
-        #endif
-    } else {
-        std::cout << YELLOW << "[Warn] Cannot find sufficient 3D Speed parameters. Using GPS Speed." << RESET << "\n";
-        if (!metadata.count("GPS Speed") || !metadata.count("GPS Speed Ref")) {
-            std::cerr << RED << "[Error] Missing GPSSpeed or GPSSpeedRef for 2D speed fallback." << RESET << std::endl;
-        }
-        speedX = parseExifGPSSpeed(metadata["GPS Speed"], metadata["GPS Speed Ref"]);
-        speedY = speedZ = 0.0f;
+// Finds Drone Speed (both 3D Speed, m/s and Overall Speed, m/s are valid)
+void Deblurrer::findSpeedFromMetadata(const std::unordered_map<std::string, std::string>& metadata, float &speedX, float &speedY, float &speedZ) {
+    bool hasX = parseFloatFromMetadata(metadata, "Flight X Speed", speedX);
+    bool hasY = parseFloatFromMetadata(metadata, "Flight Y Speed", speedY);
+    bool hasZ = parseFloatFromMetadata(metadata, "Flight Z Speed", speedZ);
+
+    if (!hasX || !hasY || !hasZ) {
+        float gpsSpeed = 0.0f;
+        std::string gpsRef;
+        parseFloatFromMetadata(metadata, "GPS Speed", gpsSpeed);
+        auto it = metadata.find("GPS Speed Ref");
+        gpsRef = (it != metadata.end()) ? it->second : "N"; // default
+
+        speedX = gpsSpeed; 
+        speedY = 0.0f; 
+        speedZ = 0.0f;
+        std::cout << YELLOW << "[Warn] Using GPS speed fallback: " << speedX << " m/s" << RESET << std::endl;
     }
 }
 
-// Finds GSD from given metadata (mm/px)
-float Deblurrer::findGSDFromMetadata(std::unordered_map<std::string, std::string> &metadata) {
-    float alt = std::stof(metadata["GPS Altitude"]);       // m
-    float flen = std::stof(metadata["Focal Length"]);      // mm
-    int imageWidth = std::stoi(metadata["Image Width"]);   // px
-    int imageHeight = std::stoi(metadata["Image Height"]); // px
+// Calculate ground sample distance (GSD)
+float Deblurrer::calculateGSD(float altitude, float focalLength, int imageWidth, int imageHeight, float sensorWidth = 3.68f, float sensorHeight = 2.76f) {
+    altitude *= 1000.0f; // m -> mm
 
-    return calculateGSD(alt, flen, imageWidth, imageHeight, config_.sensorWidth, config_.sensorHeight); // mm/px
+    float gsdWidth = (altitude * sensorWidth) / (focalLength * imageWidth);    // mm/px
+    float gsdHeight = (altitude * sensorHeight) / (focalLength * imageHeight); // mm/px
+
+    float gsd = std::max(gsdWidth, gsdHeight); // mm/px
+
+    #ifdef DEBUG
+        std::cout << "[Info] GSD: Calculated GSD = " << gsd << " mm/px\n";
+        std::cout << "  Focal Length: " << focalLength << " mm\n";
+        std::cout << "  Sensor Size: " << sensorWidth << "x" << sensorHeight << " mm\n";
+        std::cout << "  Image Resolution: " << imageWidth << "x" << imageHeight << " px\n";
+        std::cout << "  Altitude: " << altitude << " mm\n";
+    #endif
+
+    return gsd;
+}
+
+// Finds GSD from given metadata (mm/px)
+float Deblurrer::findGSDFromMetadata(const std::unordered_map<std::string, std::string>& metadata) {
+    float alt = 0, flen = 0;
+    int width = 0, height = 0;
+
+    if (!parseFloatFromMetadata(metadata, "GPS Altitude", alt) ||
+        !parseFloatFromMetadata(metadata, "Focal Length", flen) ||
+        !parseIntFromMetadata(metadata, "Image Width", width) ||
+        !parseIntFromMetadata(metadata, "Image Height", height)) {
+        std::cerr << RED << "[Error] Missing essential metadata for GSD computation." << RESET << std::endl;
+        return 1.0f; // fallback (1 mm/px)
+    }
+
+    return calculateGSD(alt, flen, width, height, config_.sensorWidth, config_.sensorHeight);
 }
 
 // Finds GPS Image Direction (in case of Overall Speed) in radians
-float Deblurrer::findGPSImgDirectionFromMetadata(std::unordered_map<std::string, std::string> &metadata) {
-    float gpsImgDirection = metadata.count("GPS Img Direction") ? std::stof(metadata["GPS Img Direction"]) : 0.0f;
+float Deblurrer::findGPSImgDirectionFromMetadata(const std::unordered_map<std::string, std::string> &metadata) {
+    float gpsImgDirection = 0.0f;
+    if (!parseFloatFromMetadata(metadata, "GPS Img Direction", gpsImgDirection)) {
+        std::cerr << RED << "[Error] Missing essential metadata for GSD computation." << RESET << std::endl;
+    }
     return gpsImgDirection * static_cast<float>(CV_PI) / 180.0f;
 }
 
-void Deblurrer::findVBodies(std::unordered_map<std::string, std::string> &metadata, float &Vx, float &Vy, float &Vz, float &speed) {
+void Deblurrer::findVBodies(const std::unordered_map<std::string, std::string> &metadata, float &Vx, float &Vy, float &Vz, float &speed) {
     float speedX, speedY, speedZ, yawRad, pitchRad, rollRad, exposure, gpsImgDirection;
 
     findPitchRollYawFromMetadata(metadata, pitchRad, rollRad, yawRad);
     findSpeedFromMetadata(metadata, speedX, speedY, speedZ); // in case where only GPS Speed is present, the result is stored in speedX
+
+    float cy = std::cos(yawRad); float sy = std::sin(yawRad);
+    float cp = std::cos(pitchRad); float sp = std::sin(pitchRad);
+    float cr = std::cos(rollRad); float sr = std::sin(rollRad);
 
     // This is the rotation matrix from World (NED) to Body frame (ZYX Euler sequence):
     // R = Rx(roll) * Ry(pitch) * Rz(yaw)
@@ -360,12 +371,8 @@ void Deblurrer::findVBodies(std::unordered_map<std::string, std::string> &metada
     // Vx body - (forward/optical axis component) -> low influence on blur
     // Vy body - (right component in body frame, perpendicular to optical axis)
     // Vz body - (down component in body frame, perpendicular to optical axis)
-    if (speedX && speedY && speedZ) {
-        float cy = std::cos(yawRad); float sy = std::sin(yawRad);
-        float cp = std::cos(pitchRad); float sp = std::sin(pitchRad);
-        float cr = std::cos(rollRad); float sr = std::sin(rollRad);
-
-        Vx = speedX * (cp * cy) + speedY * (cp * sy) + speedZ * (-sp);
+    if (std::abs(speedX) > 1e-6f || std::abs(speedY) > 1e-6f || std::abs(speedZ) > 1e-6f) {
+        // Vx = speedX * (cp * cy) + speedY * (cp * sy) + speedZ * (-sp); // not used in calculations
         Vy = speedX * (sr * sp * cy - cr * sy) + speedY * (sr * sp * sy + cr * cy) + speedZ * (sr * cp);
         Vz = speedX * (cr * sp * cy + sr * sy) + speedY * (cr * sp * sy - sr * cy) + speedZ * (cr * cp);
         speed = std::sqrt(Vy * Vy + Vz * Vz);
@@ -375,29 +382,10 @@ void Deblurrer::findVBodies(std::unordered_map<std::string, std::string> &metada
         float vx = std::cos(gpsImgDirection);
         float vy = std::sin(gpsImgDirection);
         
-        float cy = std::cos(yawRad); float sy = std::sin(yawRad);
-        float cp = std::cos(pitchRad); float sp = std::sin(pitchRad);
-        float cr = std::cos(rollRad);  float sr = std::sin(rollRad);
-        
         Vy = vx * (sr * sp * cy - cr * sy) + vy * (sr * sp * sy + cr * cy);
         Vz = vx * (cr * sp * cy + sr * sy) + vy * (cr * sp * sy - sr * cy);
         speed = speedX;
     }
-}
-
-cv::Mat Deblurrer::normalizePSF(const cv::Mat& psf) {
-    cv::Mat normPSF;
-    psf.convertTo(normPSF, CV_32F);
-
-    float normSum = cv::sum(psf)[0];
-    if (normSum <= 1e-6) {
-        std::cerr << RED << "[Error] PSF generation failed — normalization invalid." << RESET << "\n";
-        normPSF.setTo(0);
-        return normPSF;
-    }
-    normPSF /= static_cast<float>(normSum);
-
-    return normPSF;
 }
 
 // Estimate point spread function (PSF)
@@ -423,31 +411,9 @@ void Deblurrer::estimatePSF(int blurLengthPx, float blurAngleRad, cv::Mat& psf) 
         cv::GaussianBlur(psf, psf, cv::Size(blurSize, blurSize), sigma, sigma, cv::BORDER_REPLICATE);
     }
 
-    psf = normalizePSF(psf);
-
     #ifdef DEBLUR_DEBUG 
         visualizeMatrix(psf, "psf.png");
     #endif
-}
-
-// Calculate ground sample distance (GSD)
-float Deblurrer::calculateGSD(float altitude, float focalLength, int imageWidth, int imageHeight, float sensorWidth = 3.68f, float sensorHeight = 2.76f) {
-    altitude *= 1000.0f; // m -> mm
-
-    float gsdWidth = (altitude * sensorWidth) / (focalLength * imageWidth);    // mm/px
-    float gsdHeight = (altitude * sensorHeight) / (focalLength * imageHeight); // mm/px
-
-    float gsd = std::max(gsdWidth, gsdHeight); // mm/px
-
-    #ifdef DEBUG
-        std::cout << "[Info] GSD: Calculated GSD = " << gsd << " mm/px\n";
-        std::cout << "  Focal Length: " << focalLength << " mm\n";
-        std::cout << "  Sensor Size: " << sensorWidth << "x" << sensorHeight << " mm\n";
-        std::cout << "  Image Resolution: " << imageWidth << "x" << imageHeight << " px\n";
-        std::cout << "  Altitude: " << altitude << " mm\n";
-    #endif
-
-    return gsd;
 }
 
 cv::Mat createHannWindow2D(int rows, int cols) {
@@ -538,9 +504,8 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
 
     cv::ocl::setUseOpenCL(true);
 
-    cv::Mat normPSF = normalizePSF(psf);
     cv::UMat inputF = padInput(input, psf);
-    cv::UMat psfDFT = psfdft(normPSF, inputF.size());
+    cv::UMat psfDFT = psfdft(psf, inputF.size()); // expects normalized psf
     
     auto [psfConj, psfMag2] = psfConjMag(psfDFT); // <cv::UMat, cv::UMat>
 
@@ -716,63 +681,39 @@ std::vector<cv::Mat> Deblurrer::deconvolve(const std::vector<cv::Mat>& inputChan
 }
 
 // Possibly a solution for removing ghosting artifacts
-cv::Mat findLowContrastRegions(const cv::Mat &deblurred, const cv::Mat &psf, int blurLength) {
-    cv::Mat gray; 
-    if (deblurred.channels() == 3) 
-        cv::cvtColor(deblurred, gray, cv::COLOR_BGR2GRAY); 
-    else gray = deblurred.clone(); 
-    gray.convertTo(gray, CV_32F, 1.0 / 255.0); 
+// cv::Mat findLowContrastRegions(const cv::Mat &deblurred, const cv::Mat &psf, int blurLength) {
+//     cv::Mat gray; 
+//     if (deblurred.channels() == 3) 
+//         cv::cvtColor(deblurred, gray, cv::COLOR_BGR2GRAY); 
+//     else gray = deblurred.clone(); 
+//     gray.convertTo(gray, CV_32F, 1.0 / 255.0); 
 
-    cv::Mat gray8u; gray.convertTo(gray8u, CV_8U, 255.0); 
-    cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8)); 
-    cv::Mat enhanced; 
-    clahe->apply(gray8u, enhanced); 
-    enhanced.convertTo(enhanced, CV_32F, 1.0 / 255.0); 
+//     cv::Mat gray8u; gray.convertTo(gray8u, CV_8U, 255.0); 
+//     cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8)); 
+//     cv::Mat enhanced; 
+//     clahe->apply(gray8u, enhanced); 
+//     enhanced.convertTo(enhanced, CV_32F, 1.0 / 255.0); 
 
-    cv::Moments m = cv::moments(psf, true); 
-    double angle = 0.0; 
+//     cv::Moments m = cv::moments(psf, true); 
+//     double angle = 0.0; 
     
-    if (m.mu20 + m.mu02 != 0) angle = 0.5 * atan2(2 * m.mu11, m.mu20 - m.mu02); // radians 
+//     if (m.mu20 + m.mu02 != 0) angle = 0.5 * atan2(2 * m.mu11, m.mu20 - m.mu02); // radians 
 
-    cv::Point2f shift(std::cos(angle), std::sin(angle)); 
-    cv::Mat shifted = cv::Mat::zeros(enhanced.size(), CV_32F); 
-    cv::Mat M = (cv::Mat_<float>(2, 3) << 1, 0, blurLength * shift.x, 0, 1, blurLength * shift.y); 
-    cv::warpAffine(enhanced, shifted, M, enhanced.size(), cv::INTER_LINEAR, cv::BORDER_REFLECT); 
+//     cv::Point2f shift(std::cos(angle), std::sin(angle)); 
+//     cv::Mat shifted = cv::Mat::zeros(enhanced.size(), CV_32F); 
+//     cv::Mat M = (cv::Mat_<float>(2, 3) << 1, 0, blurLength * shift.x, 0, 1, blurLength * shift.y); 
+//     cv::warpAffine(enhanced, shifted, M, enhanced.size(), cv::INTER_LINEAR, cv::BORDER_REFLECT); 
 
-    cv::Mat diff; 
-    cv::absdiff(enhanced, shifted, diff);
-    cv::Mat ghostLikelihood; ghostLikelihood = 1.0 - diff; 
-    cv::normalize(ghostLikelihood, ghostLikelihood, 0, 1, cv::NORM_MINMAX); 
+//     cv::Mat diff; 
+//     cv::absdiff(enhanced, shifted, diff);
+//     cv::Mat ghostLikelihood; ghostLikelihood = 1.0 - diff; 
+//     cv::normalize(ghostLikelihood, ghostLikelihood, 0, 1, cv::NORM_MINMAX); 
 
-    cv::GaussianBlur(ghostLikelihood, ghostLikelihood, cv::Size(7, 7), 2.0); 
-    cv::Mat mask8u; cv::normalize(ghostLikelihood, ghostLikelihood, 0, 255, cv::NORM_MINMAX); 
-    ghostLikelihood.convertTo(mask8u, CV_8U); 
-    return mask8u;
-}
-
-// this part is responsible for extracting ghosting from contrast mask, needs to be improved
-cv::Mat getGhostingMask(const cv::Mat &image, const cv::Mat &lowContrastMask) {
-    cv::Mat floatImage, floatLC, gray;
-    lowContrastMask.convertTo(floatLC, CV_32F);
-    image.convertTo(floatImage, CV_32F);
-
-    if (floatImage.channels() != 1) {
-        cv::cvtColor(floatImage, gray, cv::COLOR_BGR2GRAY);
-    } else {
-        floatImage.copyTo(gray);
-    }
-
-    cv::Mat gx, gy;
-    cv::Sobel(gray, gx, CV_32F, 1, 0, 3);
-    cv::Sobel(gray, gy, CV_32F, 0, 1, 3);
-
-    cv::Mat mag;
-    cv::magnitude(gx, gy, mag);
-
-    cv::Mat ghosting = floatLC - mag;
-
-    return ghosting;
-}
+//     cv::GaussianBlur(ghostLikelihood, ghostLikelihood, cv::Size(7, 7), 2.0); 
+//     cv::Mat mask8u; cv::normalize(ghostLikelihood, ghostLikelihood, 0, 255, cv::NORM_MINMAX); 
+//     ghostLikelihood.convertTo(mask8u, CV_8U); 
+//     return mask8u;
+// }
 
 void Deblurrer::denoiseImage(cv::Mat& image, float strength = 10.0f, float edgeStrength = 0.4f) {
     if (image.empty()) {
@@ -821,6 +762,15 @@ void Deblurrer::deblurImage(const std::string &inputImagePath, float snr = 1500.
     cv::Mat psf;
     estimatePSF(blurLength, blurAngleRad, psf);
 
+    // Normalize PSF
+    float normSum = static_cast<float>(cv::sum(psf)[0]);
+    if (normSum > 1e-6f) {
+        psf /= normSum;
+    } else {
+        std::cerr << RED << "[Error] PSF generation failed — normalization invalid." << RESET << "\n";
+        psf.setTo(0);
+    }
+
     cv::Mat deblurred;
     wienerDeconvolution(blurred, psf, deblurred, blurLength, snr);
 
@@ -836,9 +786,9 @@ void Deblurrer::deblurImage(const std::string &inputImagePath, float snr = 1500.
     saveImage(deblurred, inputImagePath, "_deblurred");
 
     // experinmental
-    cv::Mat lowContrast = findLowContrastRegions(deblurred, psf, blurLength);
-    cv::Mat ghosting = getGhostingMask(deblurred, lowContrast);
+    // cv::Mat lowContrast = findLowContrastRegions(deblurred, psf, blurLength);
+    // cv::Mat final = removeGhosting(deblurred, lowContrast, blurLength, blurAngleRad);
 
-    ghosting.convertTo(ghosting, CV_8U);
-    saveImage(ghosting, inputImagePath, "_ghostmask");
+    // final.convertTo(final, CV_8U);
+    // saveImage(final, inputImagePath, "_ghostmask");
 }

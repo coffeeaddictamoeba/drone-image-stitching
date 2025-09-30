@@ -29,18 +29,17 @@ class Deblurrer {
         void estimatePSF(int blurLengthPx, float blurAngleRad, cv::Mat &syntheticPSF);
         void wienerDeconvolution(const cv::Mat& blurred, const cv::Mat& psf, cv::Mat& outputImage, float blurLength, float snr);
         void denoiseImage(cv::Mat& image, float strength, float edgeStrength);
-        bool isBlurred(const cv::Mat &image, float blurThreshold);
+        bool isBlurred(const cv::Mat &image, float blurThreshold, int maxImageSize);
 
         // Metadata reading helpers
-        void findPitchRollYawFromMetadata(std::unordered_map<std::string, std::string> &metadata, float &pitchRad, float &rollRad, float &yawRad);
-        void findSpeedFromMetadata(std::unordered_map<std::string, std::string> &metadata, float &speedX, float &speedY, float &speedZ);
-        void findVBodies(std::unordered_map<std::string, std::string> &metadata, float &Vx, float &Vy, float &Vz, float &speed);
-        float findGSDFromMetadata(std::unordered_map<std::string, std::string> &metadata);
-        float findGPSImgDirectionFromMetadata(std::unordered_map<std::string, std::string> &metadata);
+        void findPitchRollYawFromMetadata(const std::unordered_map<std::string, std::string> &metadata, float &pitchRad, float &rollRad, float &yawRad);
+        void findSpeedFromMetadata(const std::unordered_map<std::string, std::string> &metadata, float &speedX, float &speedY, float &speedZ);
+        void findVBodies(const std::unordered_map<std::string, std::string> &metadata, float &Vx, float &Vy, float &Vz, float &speed);
+        float findGSDFromMetadata(const std::unordered_map<std::string, std::string> &metadata);
+        float findGPSImgDirectionFromMetadata(const std::unordered_map<std::string, std::string> &metadata);
 
         // Deblur helpers
         cv::UMat padInput(const cv::Mat& input, const cv::Mat& psf);
-        cv::Mat normalizePSF(const cv::Mat& psf);
         cv::UMat psfdft(const cv::Mat& normPSF, cv::Size targetSize);
         std::pair<cv::UMat, cv::UMat> psfConjMag(const cv::UMat& psfDFT);
         cv::Mat createSNRMap(cv::Size size, const cv::Mat& psf);
