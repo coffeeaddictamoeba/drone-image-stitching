@@ -153,7 +153,7 @@ void Deblurrer::saveImage(const cv::Mat &image, const std::string &inputImagePat
         newImagePath = constructPathWithNewDir(newImagePath, config_.targetDir);
     }
 
-    imwrite(newImagePath, image);
+    cv::imwrite(newImagePath, image);
     copyMetadata(inputImagePath, newImagePath);
 
     std::cout << "[Info] Final image is saved to: " << newImagePath << "\n";
@@ -414,6 +414,15 @@ void Deblurrer::estimatePSF(int blurLengthPx, float blurAngleRad, cv::Mat& psf) 
     #ifdef DEBLUR_DEBUG 
         visualizeMatrix(psf, "psf.png");
     #endif
+
+    // Normalize PSF
+    float normSum = static_cast<float>(cv::sum(psf)[0]);
+    if (normSum > 1e-6f) {
+        psf /= normSum;
+    } else {
+        std::cerr << RED << "[Error] PSF generation failed — normalization invalid." << RESET << "\n";
+        psf.setTo(0);
+    }
 }
 
 cv::Mat createHannWindow2D(int rows, int cols) {
@@ -760,16 +769,7 @@ void Deblurrer::deblurImage(const std::string &inputImagePath, float snr = 1500.
     }
 
     cv::Mat psf;
-    estimatePSF(blurLength, blurAngleRad, psf);
-
-    // Normalize PSF
-    float normSum = static_cast<float>(cv::sum(psf)[0]);
-    if (normSum > 1e-6f) {
-        psf /= normSum;
-    } else {
-        std::cerr << RED << "[Error] PSF generation failed — normalization invalid." << RESET << "\n";
-        psf.setTo(0);
-    }
+    estimatePSF(blurLength, blurAngleRad, psf); // normalized automatically
 
     cv::Mat deblurred;
     wienerDeconvolution(blurred, psf, deblurred, blurLength, snr);
