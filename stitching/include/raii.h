@@ -1,7 +1,7 @@
 #ifndef RAII_H
 #define RAII_H
 
-#include <gdal/gdal_priv.h>
+#include <gdal_priv.h>
 #include <string>
 #include <iostream>
 #include <filesystem>

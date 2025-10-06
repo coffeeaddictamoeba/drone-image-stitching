@@ -442,23 +442,23 @@ cv::Mat createHannWindow2D(int rows, int cols) {
     return hannY * hannX;  // outer product to form 2D window
 }
 
-void Deblurrer::fftShift(cv::UMat& input) {
+void Deblurrer::fftShift(cv::Mat& input) {
     input = input(cv::Rect(0, 0, input.cols & -2, input.rows & -2));  // make even size
     int cx = input.cols / 2;
     int cy = input.rows / 2;
 
-    cv::UMat q0(input, cv::Rect(0, 0, cx, cy));   // top-left
-    cv::UMat q1(input, cv::Rect(cx, 0, cx, cy));  // top-right
-    cv::UMat q2(input, cv::Rect(0, cy, cx, cy));  // bottom-left
-    cv::UMat q3(input, cv::Rect(cx, cy, cx, cy)); // bottom-right
+    cv::Mat q0(input, cv::Rect(0, 0, cx, cy));   // top-left
+    cv::Mat q1(input, cv::Rect(cx, 0, cx, cy));  // top-right
+    cv::Mat q2(input, cv::Rect(0, cy, cx, cy));  // bottom-left
+    cv::Mat q3(input, cv::Rect(cx, cy, cx, cy)); // bottom-right
 
-    cv::UMat tmp;
+    cv::Mat tmp;
     q0.copyTo(tmp);  q3.copyTo(q0);  tmp.copyTo(q3);
     q1.copyTo(tmp);  q2.copyTo(q1);  tmp.copyTo(q2);
 }
 
-cv::UMat Deblurrer::psfdft(const cv::Mat& normPSF, cv::Size targetSize) {
-    cv::UMat paddedPSF(targetSize, CV_32F);
+cv::Mat Deblurrer::psfdft(const cv::Mat& normPSF, cv::Size targetSize) {
+    cv::Mat paddedPSF(targetSize, CV_32F);
     paddedPSF.setTo(0);
 
     int cx = (paddedPSF.cols - normPSF.cols) / 2;
@@ -468,16 +468,16 @@ cv::UMat Deblurrer::psfdft(const cv::Mat& normPSF, cv::Size targetSize) {
 
     fftShift(paddedPSF); // As PSF is generated at the center of image, FFT Shift moves it to (0,0) for DFT
     
-    cv::UMat psfDFT;
+    cv::Mat psfDFT;
     cv::dft(paddedPSF, psfDFT, cv::DFT_COMPLEX_OUTPUT);
     return psfDFT;
 }
 
-std::pair<cv::UMat, cv::UMat> Deblurrer::psfConjMag(const cv::UMat& psfDFT) {
-    std::vector<cv::UMat> psfPlanes(2);
+std::pair<cv::Mat, cv::Mat> Deblurrer::psfConjMag(const cv::Mat& psfDFT) {
+    std::vector<cv::Mat> psfPlanes(2);
     cv::split(psfDFT, psfPlanes);
 
-    cv::UMat temp0, temp1, psfMag2;
+    cv::Mat temp0, temp1, psfMag2;
     temp0 = psfPlanes[0].mul(psfPlanes[0]);
     temp1 = psfPlanes[1].mul(psfPlanes[1]);
     cv::add(temp0, temp1, psfMag2);
@@ -488,14 +488,14 @@ std::pair<cv::UMat, cv::UMat> Deblurrer::psfConjMag(const cv::UMat& psfDFT) {
 
     psfPlanes[1] = psfPlanes[1].mul(-1);
 
-    cv::UMat psfConj;
+    cv::Mat psfConj;
     cv::merge(psfPlanes, psfConj);
 
     return {psfConj, psfMag2};
 }
 
-cv::UMat Deblurrer::padInput(const cv::Mat& input, const cv::Mat& psf) {
-    cv::UMat inputF;
+cv::Mat Deblurrer::padInput(const cv::Mat& input, const cv::Mat& psf) {
+    cv::Mat inputF;
     input.convertTo(inputF, CV_32F, 1.0 / 255.0);
 
     int padY = psf.rows;
@@ -511,22 +511,23 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
         return;
     }
 
-    cv::ocl::setUseOpenCL(true);
+    // As GPU acceleration in this case is negligible, it is removed for now
+    //cv::ocl::setUseOpenCL(true);
 
-    cv::UMat inputF = padInput(input, psf);
-    cv::UMat psfDFT = psfdft(psf, inputF.size()); // expects normalized psf
+    cv::Mat inputF = padInput(input, psf);
+    cv::Mat psfDFT = psfdft(psf, inputF.size()); // expects normalized psf
     
-    auto [psfConj, psfMag2] = psfConjMag(psfDFT); // <cv::UMat, cv::UMat>
+    auto [psfConj, psfMag2] = psfConjMag(psfDFT); // <cv::Mat, cv::Mat>
 
     cv::Mat snrMap = createSNRMap(inputF.size(), psf);
-    cv::Mat inputF_cpu; inputF.copyTo(inputF_cpu);          // cv::UMat -> cv::Mat
-    cv::Mat psfMag2_cpu; psfMag2.copyTo(psfMag2_cpu);       // cv::UMat -> cv::Mat
+    //cv::Mat inputF_cpu; inputF.copyTo(inputF_cpu);          // cv::Mat -> cv::Mat
+    //cv::Mat psfMag2_cpu; psfMag2.copyTo(psfMag2_cpu);       // cv::Mat -> cv::Mat
     #ifdef DEBLUR_DEBUG
-        visualizeMatrix(psfMag2_cpu, "psfMag2.png");
-        countMatrixZeros(psfMag2_cpu, "psfMag");
+        visualizeMatrix(psfMag2, "psfMag2.png");
+        countMatrixZeros(psfMag2, "psfMag");
     #endif
 
-    cv::Mat wienerDenom = buildWienerDenominator(psfMag2_cpu, snrMap, snr, inputF_cpu, psf);
+    cv::Mat wienerDenom = buildWienerDenominator(psfMag2, snrMap, snr, inputF, psf);
 
     #ifdef DEBLUR_DEBUG
         visualizeMatrix(snrMap, "snrMap.png");
@@ -534,7 +535,7 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
         countMatrixZeros(wienerDenom, "wienerDenom");
     #endif
 
-    auto inputChannels = splitInputChannels(inputF_cpu);
+    auto inputChannels = splitInputChannels(inputF);
     cv::Mat hann = createHannWindow2D(inputF.rows, inputF.cols);
     cv::Mat mask;
     if (blurLength >= 75.0f) {
@@ -543,8 +544,8 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
         mask = cv::Mat(input.size(), CV_32F, 1.0f);
     }
 
-    cv::Mat psfConj_cpu; psfConj.copyTo(psfConj_cpu);
-    auto outputChannels = deconvolve(inputChannels, psfConj_cpu, wienerDenom, hann, mask, input, psf);
+    //cv::Mat psfConj_cpu; psfConj.copyTo(psfConj_cpu);
+    auto outputChannels = deconvolve(inputChannels, psfConj, wienerDenom, hann, mask, input, psf);
 
     if (outputChannels.size() == 1)
         output = outputChannels[0];

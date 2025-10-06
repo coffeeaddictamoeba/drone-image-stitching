@@ -24,47 +24,46 @@ BatchProcessor::BatchProcessor(const Config& config_ref, std::queue<BatchTask>& 
 }
 
 void BatchProcessor::processBatchesLoop() {
-    while (!stopSignal_) {
+    while (!stopSignal_.load()) {
         std::unique_lock<std::mutex> lock(queueMutex_);
         queueCV_.wait(lock, [this] { return !batchQueue_.empty() || stopSignal_.load(); });
 
         if (stopSignal_.load()) {
-            std::lock_guard<std::mutex> lock(queueMutex_);
-            batchQueue_ = {}; // clear remaining tasks
+            // no need to re-lock, we already own it here
+            while (!batchQueue_.empty()) batchQueue_.pop();
             break;
         }
-        
+
         if (batchQueue_.empty()) continue;
 
         BatchTask task = batchQueue_.front();
         batchQueue_.pop();
         lock.unlock();
 
-        if (stopSignal_) break;
+        if (stopSignal_.load()) break;
 
-        fs::path batch_path = createBatchDirectory(task.images, task.batch_id++);
+        fs::path batch_path = createBatchDirectory(task.images, task.batch_id);
         fs::path ortho_path = batch_path / "odm_orthophoto" / "odm_orthophoto.tif";
 
         if (runOdmBatchSuccessful(batch_path, ortho_path)) {
             mergeWithOTB(ortho_path);
         } else {
-            std::cerr << RED << "[FATAL] Batch failed after " << config_.retries << " retries: " << batch_path << RESET << std::endl;
+            std::cerr << RED << "[FATAL] Batch failed after " 
+                      << config_.retries << " retries: " << batch_path << RESET << std::endl;
         }
 
+        // cleanup
         for (const auto& entry : fs::directory_iterator(batch_path)) {
-            if (entry.path().filename() == "images") {
-                std::cout << "[DEBUG] Skipping removal of: " << entry.path() << std::endl;
-                continue;
-            }
+            if (entry.path().filename() == "images") continue;
             try {
                 fs::remove_all(entry.path());
-                std::cout << "[DEBUG] Removed: " << entry.path() << std::endl;
             } catch (const fs::filesystem_error& e) {
-                std::cerr << RED <<"[WARNING] Failed to remove " << entry.path() << ": " << e.what() << RESET << std::endl;
+                std::cerr << RED << "[WARNING] Failed to remove " 
+                          << entry.path() << ": " << e.what() << RESET << std::endl;
             }
         }
-        if (stopSignal_.load()) break;
     }
+
     std::cout << "[INFO] BatchProcessor loop stopped." << std::endl;
 }
 
@@ -91,14 +90,29 @@ int BatchProcessor::runCommand(const std::string& cmd) {
 
     #ifndef _WIN32
         pid_t pid = fork();
-        if (pid == 0) { execl("/bin/sh", "sh", "-c", cmd.c_str(), nullptr); _exit(127); }
-        int status;
+        if (pid == 0) {
+            // Child
+            execl("/bin/sh", "sh", "-c", cmd.c_str(), nullptr);
+            _exit(127);
+        }
+
+        int status = 0;
         while (true) {
             pid_t w = waitpid(pid, &status, WNOHANG);
-            if (w == pid) break; // finished
-            if (stopSignal_.load()) { kill(pid, SIGINT); waitpid(pid, &status, 0); break; }
+            if (w == pid) break; // process finished
+
+            if (stopSignal_.load()) {
+                std::cerr << "[INFO] Stopping command: " << cmd << std::endl;
+                kill(pid, SIGTERM);                 // try graceful stop first
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                kill(pid, SIGKILL);                 // force kill if still alive
+                waitpid(pid, &status, 0);
+                return -1;
+            }
+
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
+
         return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
     #else
         return std::system(cmd.c_str());

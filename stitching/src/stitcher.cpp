@@ -1,6 +1,6 @@
 #include "../include/stitcher.h"
 #include <iostream>
-#include <gdal/gdal_version.h>
+#include <gdal_version.h>
 
 #define RESET   "\033[0m"
 #define RED     "\033[31m"      // Errors
@@ -77,6 +77,7 @@ void MosaicStitcher::run(int argc, char* argv[]) {
     initGDAL();
 
     std::signal(SIGINT, MosaicStitcher::signalHandler);
+    std::signal(SIGTERM, MosaicStitcher::signalHandler);
 
     watcher_ = std::make_unique<FolderWatcher>(config_, batchQueue_, queueMutex_, queueCV_, stopSignal_);
     processor_ = std::make_unique<BatchProcessor>(config_, batchQueue_, queueMutex_, queueCV_, stopSignal_);
