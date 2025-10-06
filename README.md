@@ -7,14 +7,14 @@ This is an application for fast, lightweight and secure drone image stitching.
 ---
 
 - [OpenDroneMap (ODM)](https://github.com/OpenDroneMap/ODM)
-- [Orfeo ToolBox (OTB)](https://github.com/orfeotoolbox/OTB)
+- [Orfeo ToolBox (OTB)](https://github.com/orfeotoolbox/OTB) - [List of prebuilt packages here](https://orfeo-toolbox.org/packages/)
 - [ExifTool](https://exiftool.org/)
 - [GDAL](https://github.com/OSGeo/gdal)
 - [OpenCV](https://opencv.org/)
 - FFTW3 for OpenCV
 - OpenJP2 and PROJ for GDAL
 
-**NOTE:** This project uses ODM by Docker and OTB CLI (https://www.orfeo-toolbox.org/CookBook/CliInterface.html)
+**NOTE:** This project uses ODM by Docker and OTB CLI (https://www.orfeo-toolbox.org/CookBook/CliInterface.html). Packages are available at https://orfeo-toolbox.org/packages/ with exact package used in this project https://orfeo-toolbox.org/packages/OTB-9.1.0-Linux.tar.gz
 
 ### How to Build
 

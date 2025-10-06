@@ -34,6 +34,7 @@ private:
     static void signalHandler(int signum);
 
     void parseArgs(int argc, char* argv[]);
+    void isMySetupOkay();
     void initGDAL();
     void cleanupGDAL();
 };

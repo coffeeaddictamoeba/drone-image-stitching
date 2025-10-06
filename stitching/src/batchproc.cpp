@@ -19,8 +19,8 @@
 
 BatchProcessor::BatchProcessor(const Config& config_ref, std::queue<BatchTask>& batch_queue, std::mutex& queue_mutex, std::condition_variable& queue_cv, std::atomic<bool>& stop_signal)
     : config_(config_ref), batchQueue_(batch_queue), queueMutex_(queue_mutex), queueCV_(queue_cv), stopSignal_(stop_signal) {
-    fs::create_directories(BATCHES_DIR);
-    fs::create_directories(fs::path(STITCHED_FILE).parent_path());
+    fs::create_directories(config_.batchDir);
+    fs::create_directories(fs::path(config_.stitchedFile).parent_path());
 }
 
 void BatchProcessor::processBatchesLoop() {
@@ -48,8 +48,7 @@ void BatchProcessor::processBatchesLoop() {
         if (runOdmBatchSuccessful(batch_path, ortho_path)) {
             mergeWithOTB(ortho_path);
         } else {
-            std::cerr << RED << "[FATAL] Batch failed after " 
-                      << config_.retries << " retries: " << batch_path << RESET << std::endl;
+            std::cerr << RED << "[FATAL] Batch failed after " << config_.retries << " retries: " << batch_path << RESET << std::endl;
         }
 
         // cleanup
@@ -58,8 +57,7 @@ void BatchProcessor::processBatchesLoop() {
             try {
                 fs::remove_all(entry.path());
             } catch (const fs::filesystem_error& e) {
-                std::cerr << RED << "[WARNING] Failed to remove " 
-                          << entry.path() << ": " << e.what() << RESET << std::endl;
+                std::cerr << RED << "[WARNING] Failed to remove " << entry.path() << ": " << e.what() << RESET << std::endl;
             }
         }
     }
@@ -70,7 +68,7 @@ void BatchProcessor::processBatchesLoop() {
 fs::path BatchProcessor::createBatchDirectory(const std::vector<fs::path>& images, int batch_id) {
     std::stringstream ss;
     ss << "batch_" << std::setw(3) << std::setfill('0') << batch_id;
-    fs::path batch_root_path = fs::path(BATCHES_DIR) / ss.str();
+    fs::path batch_root_path = fs::path(config_.batchDir) / ss.str();
     fs::path images_path = batch_root_path / "images";
     
     fs::create_directories(images_path);
@@ -295,13 +293,13 @@ void BatchProcessor::mergeWithOTB(const fs::path& ortho_path) {
     ts_ss << std::put_time(std::localtime(&now_c), "%Y%m%d_%H%M%S");
     std::string timestamp = ts_ss.str();
 
-    fs::path stitched_parent_dir = fs::path(STITCHED_FILE).parent_path();
+    fs::path stitched_parent_dir = fs::path(config_.stitchedFile).parent_path();
     fs::create_directories(stitched_parent_dir);
     
-    if (!fs::exists(STITCHED_FILE)) {
+    if (!fs::exists(config_.stitchedFile)) {
         try {
-            fs::copy_file(ortho_path, STITCHED_FILE, fs::copy_options::overwrite_existing);
-            std::cout << "[INFO] Mosaic initialized with: " << STITCHED_FILE << "\n";
+            fs::copy_file(ortho_path, config_.stitchedFile, fs::copy_options::overwrite_existing);
+            std::cout << "[INFO] Mosaic initialized with: " << config_.stitchedFile << "\n";
             return;
         } catch (const fs::filesystem_error& e) {
             std::cerr << RED << "[ERROR] Failed to initialize mosaic: " << e.what() << RESET << std::endl;
@@ -312,7 +310,7 @@ void BatchProcessor::mergeWithOTB(const fs::path& ortho_path) {
     if (config_.savePreviousOrthophoto) {
         fs::path bak_path = stitched_parent_dir / ("prev_mosaic_" + timestamp + ".tif");
         try {
-            fs::copy_file(STITCHED_FILE, bak_path, fs::copy_options::overwrite_existing);
+            fs::copy_file(config_.stitchedFile, bak_path, fs::copy_options::overwrite_existing);
             std::cout << "[DEBUG] Previous mosaic backed up to: " << bak_path << std::endl;
         } catch (const fs::filesystem_error& e) {
             std::cerr << RED << "[WARN] Failed to backup previous mosaic: " << e.what() << RESET << std::endl;
@@ -322,8 +320,8 @@ void BatchProcessor::mergeWithOTB(const fs::path& ortho_path) {
     double mosaic_gt[6];
     std::optional<std::string> mosaic_proj_wkt_opt;
     int mosaic_width, mosaic_height;
-    if (!getRasterInfo(STITCHED_FILE, mosaic_gt, mosaic_proj_wkt_opt, mosaic_width, mosaic_height)) {
-        std::cerr << RED << "[ERROR] Could not get info for existing mosaic: " << STITCHED_FILE << RESET << std::endl;
+    if (!getRasterInfo(config_.stitchedFile, mosaic_gt, mosaic_proj_wkt_opt, mosaic_width, mosaic_height)) {
+        std::cerr << RED << "[ERROR] Could not get info for existing mosaic: " << config_.stitchedFile << RESET << std::endl;
         return;
     }
 
@@ -391,8 +389,9 @@ void BatchProcessor::mergeWithOTB(const fs::path& ortho_path) {
     TemporaryPath tmp_mosaic_unoptimized(tmp_mosaic_unoptimized_path);
     {
         std::stringstream mosaic_cmd;
-        mosaic_cmd << "otbcli_Mosaic -il "
-                   << "\"" << STITCHED_FILE << "\" "
+        // Use the wrapper so that OTB libraries are isolated
+        mosaic_cmd << "otbrun.sh otbcli_Mosaic -il "
+                   << "\"" << config_.stitchedFile << "\" "
                    << "\"" << new_ortho_warped_expanded.get_path().string() << "\" "
                    << "-comp.feather slim "
                    << "-comp.feather.slim.length 10 "
@@ -427,8 +426,8 @@ void BatchProcessor::mergeWithOTB(const fs::path& ortho_path) {
         if (runCommand(gdal_translate_cmd.str()) != 0) {
             std::cerr << RED << "[ERROR] gdal_translate failed to optimize output mosaic. Proceeding with unoptimized file." << RESET << "\n";
             try { // If optimization fails, try to use the unoptimized file
-                fs::rename(tmp_mosaic_unoptimized.release(), STITCHED_FILE);
-                std::cout << "[INFO] Successfully updated stitched orthomosaic (unoptimized) at: " << STITCHED_FILE<< std::endl;
+                fs::rename(tmp_mosaic_unoptimized.release(), config_.stitchedFile);
+                std::cout << "[INFO] Successfully updated stitched orthomosaic (unoptimized) at: " << config_.stitchedFile << std::endl;
             } catch (const fs::filesystem_error& e) {
                 std::cerr << RED << "[ERROR] Failed to replace stitched file with unoptimized version: " << e.what() << RESET << std::endl;
             }
@@ -437,8 +436,8 @@ void BatchProcessor::mergeWithOTB(const fs::path& ortho_path) {
     }
 
     try {
-        fs::rename(tmp_mosaic_optimized.release(), STITCHED_FILE);
-        std::cout << GREEN << "[INFO] Successfully updated stitched orthomosaic at: " << STITCHED_FILE << RESET << std::endl;
+        fs::rename(tmp_mosaic_optimized.release(), config_.stitchedFile);
+        std::cout << GREEN << "[INFO] Successfully updated stitched orthomosaic at: " << config_.stitchedFile << RESET << std::endl;
     } catch (const fs::filesystem_error& e) {
         std::cerr << RED <<"[ERROR] Failed to replace stitched file: " << e.what() << RESET << std::endl;
         return;

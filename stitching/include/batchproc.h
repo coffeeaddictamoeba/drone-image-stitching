@@ -46,9 +46,6 @@ private:
     std::condition_variable& queueCV_;
     std::atomic<bool>& stopSignal_;
 
-    static constexpr const char* STITCHED_FILE = "stitched/final_orthophoto.tif";
-    static constexpr const char* BATCHES_DIR = "batches";
-
     fs::path createBatchDirectory(const std::vector<fs::path>& images, int batch_id);
     int runCommand(const std::string& cmd);
     bool runOdmBatchInternal(const fs::path& batch_path);
