@@ -162,8 +162,10 @@ void MosaicStitcher::parseArgs(int argc, char* argv[]) {
             config_.savePreviousOrthophoto = true;
         
         // Image verification configs
-        else if (arg == "--no-retry")
+        else if (arg == "--no-retry") {
             config_.retry = false;
+            config_.retries = 0;
+        }
         else if (arg == "--retry-amount" && i + 1 < argc)
             config_.retries = std::stoi(argv[++i]);
         else if (arg == "--retry-delay" && i + 1 < argc)

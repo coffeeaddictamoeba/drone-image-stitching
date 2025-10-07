@@ -80,6 +80,7 @@ fs::path BatchProcessor::createBatchDirectory(const std::vector<fs::path>& image
             std::cerr << RED << "[ERROR] Failed to move image " << img << " to batch " << images_path << ": " << e.what() << RESET << std::endl;
         }
     }
+
     return batch_root_path;
 }
 
@@ -117,8 +118,29 @@ int BatchProcessor::runCommand(const std::string& cmd) {
     #endif
 }
 
+fs::path BatchProcessor::mapBatchPathForOdm(const fs::path& batch_path) {
+    fs::path abs_path = fs::absolute(batch_path);
+
+    // Case 1: running in a container linked to DinD
+    const char* docker_host_env = std::getenv("DOCKER_HOST");
+    if (docker_host_env) {
+        // detect mount root dynamically (try HOST_PROJECT_ROOT)
+        const char* host_root_env = std::getenv("HOST_PROJECT_ROOT");
+        std::string container_root = "/prototype"; // default container root
+        if (host_root_env) {
+            fs::path host_root = host_root_env;
+            if (abs_path.string().find(container_root) == 0) {
+                return host_root / abs_path.string().substr(container_root.size());
+            }
+        }
+    }
+
+    // Case 2: running directly on host or inside container without DinD
+    return abs_path;
+}
+
 bool BatchProcessor::runOdmBatchInternal(const fs::path& batch_path) {
-    #ifdef _WIN32
+    #ifdef _WIN32 // probably will be removed
         std::string abs_path = fs::absolute(batch_path).string();
 
         std::string docker_host_path = abs_path;
@@ -134,10 +156,10 @@ bool BatchProcessor::runOdmBatchInternal(const fs::path& batch_path) {
         std::string uid = std::to_string(getuid());
         std::string gid = std::to_string(getgid());
 
-        std::string abs_path = fs::absolute(batch_path).string();
+        std::string host_abs_path = mapBatchPathForOdm(batch_path).string();
         std::string cmd = "docker run --rm "
                     "--user " + uid + ":" + gid + " "
-                    "-v \"" + abs_path + ":/datasets/project\" "
+                    "-v \"" + host_abs_path + ":/datasets/project\" "
                     "-w /datasets/project "
                     "opendronemap/odm "
                     "--project-path /datasets project "

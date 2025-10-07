@@ -18,9 +18,12 @@
 
     # Check it is running correctly on 2375:
         # docker logs dind | grep API
-
+    
+    # Install OpenDroneMap to DinD:
+        # docker exec dind docker pull opendronemap/odm
+        
     # Run with Docker socket and host images
-        # docker run -it --rm --link dind:docker -v /absolute/path/to/images:/images -e DOCKER_HOST=tcp://docker:2375 drone-image-stitching:latest
+        # docker run -it --rm --link dind:docker -v /absolute/path/to/images:/images -e DOCKER_HOST=tcp://docker:2375 -e HOST_PROJECT_ROOT=/absolute/path/to/your/host/proj/root --user $(id -u):$(id -g) drone-image-stitching:latest
     
     # Run actual code (still in development):
     # Deblurring (works fine right now): 
@@ -41,6 +44,7 @@
         # Prerequisites: dind (docker-in-docker to run ODM), mounted image incoming directory
         # cd build/stitching
         # (Optional: verify OTB works) otbrun.sh otbcli_Mosaic -help
+        # (Optional: verify setup for stitching) ./stitching_exec --is-my-setup-ok
 
         # (Does not work for now)./stitching_exec --incoming /incoming --batch-size 15 --wait-batch-size --no-retry --no-bigtiff --save-prev
 

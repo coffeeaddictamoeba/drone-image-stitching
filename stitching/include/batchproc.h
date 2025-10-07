@@ -47,6 +47,7 @@ private:
     std::atomic<bool>& stopSignal_;
 
     fs::path createBatchDirectory(const std::vector<fs::path>& images, int batch_id);
+    fs::path mapBatchPathForOdm(const fs::path& batch_path);
     int runCommand(const std::string& cmd);
     bool runOdmBatchInternal(const fs::path& batch_path);
     bool validateGeotiff(const fs::path& path);
