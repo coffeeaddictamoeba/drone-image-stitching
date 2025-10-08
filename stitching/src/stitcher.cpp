@@ -66,7 +66,7 @@ bool isDockerDaemonRunning() {
 void MosaicStitcher::isMySetupOkay() {
     // Timestamp
     std::time_t now = std::time(nullptr);
-    std::cout << "=== Stitching Setup Check (" << std::asctime(std::localtime(&now)) << ") ===";
+    std::cout << "Stitching Setup Check (" << std::asctime(std::localtime(&now)) << ")\n";
 
     // Docker container detection
     std::cout << "[Container] " << (isDockerContainer() ? "Running inside Docker" : "Not running inside Docker") << "\n";
@@ -141,6 +141,7 @@ void MosaicStitcher::parseArgs(int argc, char* argv[]) {
             config_.batchDir = config_.dataDir + '/' + config_.batchDir;
             config_.stitchedDir = config_.dataDir + '/' + config_.stitchedDir;
             config_.incomingDir = config_.dataDir + '/' + config_.incomingDir;
+            config_.stitchedFile = config_.stitchedDir + '/' + config_.stitchedFileName;
         }
         else if (arg == "--incoming" && i + 1 < argc)
             config_.incomingDir = argv[++i];
@@ -148,8 +149,10 @@ void MosaicStitcher::parseArgs(int argc, char* argv[]) {
             config_.batchDir = argv[++i];
         else if (arg == "--stitched" && i + 1 < argc)
             config_.stitchedDir = argv[++i];
-        else if (arg == "--stitched-filename" && i + 1 < argc)
+        else if (arg == "--stitched-filename" && i + 1 < argc) {
             config_.stitchedFileName = argv[++i];
+            config_.stitchedFile = config_.stitchedDir + '/' + config_.stitchedFileName;
+        }
 
         // Memory configs
         else if (arg == "--blocksize" && i + 1 < argc)

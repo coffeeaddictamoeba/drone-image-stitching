@@ -46,17 +46,20 @@ private:
     std::condition_variable& queueCV_;
     std::atomic<bool>& stopSignal_;
 
+    // batchproc.cpp
     fs::path createBatchDirectory(const std::vector<fs::path>& images, int batch_id);
     fs::path mapBatchPathForOdm(const fs::path& batch_path);
     int runCommand(const std::string& cmd);
     bool runOdmBatchInternal(const fs::path& batch_path);
+    void mergeWithOTB(const fs::path& ortho_path);
+    bool runOdmBatchSuccessful(const fs::path& batch_path, const fs::path& ortho_path);
+
+    // tiffproc.cpp
     bool validateGeotiff(const fs::path& path);
     bool getRasterInfo(const fs::path& path, double gt[6], std::optional<std::string>& proj_wkt, int& width, int& height);
     void calculateUnionExtent(double gt1[6], int w1, int h1, double gt2[6], int w2, int h2,
                               double& union_minX, double& union_maxY, double& union_maxX, double& union_minY,
                               double& avg_resX, double& avg_resY);
-    void mergeWithOTB(const fs::path& ortho_path);
-    bool runOdmBatchSuccessful(const fs::path& batch_path, const fs::path& ortho_path);
 
     std::mutex mosaicMutex_;
 };

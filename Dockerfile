@@ -1,36 +1,55 @@
-# BUILD: from project directory (drone-image-stitching):
-    # Prerequisites: sudo systemctl start docker docker.socket + sudo usermod -aG docker $USER
-    # docker build -t drone-image-stitching .
 
-# IMAGES DIRECTORY MOUNTING:
-    # Directory "images" is serving as all images processing container
-    # For clear function distribution, "images" will have such subdirectories:
-        # incoming - directory with all initial (raw) images, sent right from the drone
-        # blurred - directory created mostly for testing for operations on clearly blurred images
-        # deblurred - directory where all deblurred (or sharp raw) images moved
-        # processing - directory where all image batch data is stored
-        # stitched - directory with final orthophoto stitched 
+# HOW TO BUILD THIS PROJECT WITH DOCKER
+# ----------------------------------------------------------------------------------------------------
+# Prerequisites:
+    # sudo systemctl start docker docker.socket (if not enabled)
+    # sudo usermod -aG docker $USER (if not set)
+# ----------------------------------------------------------------------------------------------------
+# It is highly recommended to use "dockersetup.sh" script for automatic environment setup. However,
+# if you wish, you can set it up manually following the instruction below:
 
-# RUNNING APPLICATION:
-    # Start docker-in-docker (as stitching uses Docker ODM) in separate terminal (so another target container can find it):
-        # docker run --privileged -d --name dind -e DOCKER_TLS_CERTDIR="" -p 2375:2375 docker:dind dockerd -H tcp://0.0.0.0:2375 -H unix:///var/run/docker.sock
-        # (or, if created dind once) docker start dind
+# BUILD: 
+    # Go to the project root directory (drone-image-stitching)
+    # Run "docker build --build-arg USER_ID=$(id -u) \
+    #             --build-arg GROUP_ID=$(id -g) \
+    #             --build-arg PROJECT_MOUNT_POINT=/someproject \
+    #             -t drone-image-stitching ."
 
-    # Check it is running correctly on 2375:
-        # docker logs dind | grep API
+# RUNNING CONTAINERS:
+    # Start docker-in-docker or DinD (for access to Docker ODM) from host machine terminal:
+        # docker run -d --privileged --name dind \
+        #            -e DOCKER_TLS_CERTDIR="" \
+        #            -p 2375:2375 \
+        #            -v /var/lib/docker \
+        #            -v /absolute/path/to/your/project/root:/someproject \
+        #            docker:dind dockerd \
+        #            -H tcp://0.0.0.0:2375 \
+        #            -H unix:///var/run/docker.sock
+
+        # Notice, that --build-arg PROJECT_MOUNT_POINT=/someproject should match 
+        # this line's mount point: -v /absolute/path/to/your/project/root:/someproject
+
+        # Check it is running correctly on 2375: "docker logs dind | grep API"
     
-    # Install OpenDroneMap to DinD:
-        # docker exec dind docker pull opendronemap/odm
+        # Install OpenDroneMap to DinD:
+            # docker exec dind docker pull opendronemap/odm
+            # (Verify) docker exec dind docker images
         
-    # Run with Docker socket and host images
-        # docker run -it --rm --link dind:docker -v /absolute/path/to/images:/images -e DOCKER_HOST=tcp://docker:2375 -e HOST_PROJECT_ROOT=/absolute/path/to/your/host/proj/root --user $(id -u):$(id -g) drone-image-stitching:latest
-    
-    # Run actual code (still in development):
-    # Deblurring (works fine right now): 
+    # Run app container with Docker socket and host images
+        # docker run -it --rm \
+        # --link dind:docker" \
+        # -v /absolute/path/to/your/project/root:/someproject \
+        # -e DOCKER_HOST=tcp://docker:2375 \
+        # -e HOST_PROJECT_ROOT=/absolute/path/to/your/project/root \ # (maybe unused)
+        # --user $(id -u):$(id -g) \
+        # drone-image-stitching
 
+# RUNNING CODE (still in development):
+    # Deblurring (works fine right now): 
         # Status: TESTED, WORKING
 
         # Prerequisites: mount image directory (incoming in this case) by -v /absolute/path/to/images:/images
+
         # cd build/deblurring
         # (Blur) ./deblurring_exec --blur /images/blurred/waypoint_xx_12345678.jpg --overwrite-metadata
         # (Deblur) ./deblurring_exec /images/blurred/waypoint_xx_12345678.jpg
@@ -38,15 +57,28 @@
         # (Directory-wise deblur) ./deblurring_exec --source-dir /images/incoming/ --target-dir /images/deblurred
 
     # Stitching (needs to be fixed due to dind + multiple file renaming & moving): 
-        
         # Status: REQUIRES FIX
 
         # Prerequisites: dind (docker-in-docker to run ODM), mounted image incoming directory
+
+        # IMAGES DIRECTORY MOUNTING (created automatically when running stitching module):
+        # Directory "images" is serving as all images processing container
+        # For clear function distribution, "images" will have such subdirectories:
+            # incoming - directory with all initial (raw) images, sent right from the drone
+            # blurred - directory created mostly for testing for operations on clearly blurred images
+            # deblurred - directory where all deblurred (or sharp raw) images moved
+            # processing - directory where all image batch data is stored
+            # stitched - directory with final orthophoto stitched
+        # Pass "/absolute/container/path/to/images" directory as argument for "--data" option in stitching
+
         # cd build/stitching
         # (Optional: verify OTB works) otbrun.sh otbcli_Mosaic -help
         # (Optional: verify setup for stitching) ./stitching_exec --is-my-setup-ok
+        # (Does not work for now)./stitching_exec --data /prototype/images --batch-size 15 --wait-batch-size --no-retry --no-bigtiff --save-prev
 
-        # (Does not work for now)./stitching_exec --incoming /incoming --batch-size 15 --wait-batch-size --no-retry --no-bigtiff --save-prev
+        # In case of using synthetic data clean synthetic metadata:
+            # exiftool -FlightPitchDegree= -FlightRollDegree= -FlightYawDegree= -XMP-drone-dji:FlightXSpeed= \
+            # -XMP-drone-dji:FlightYSpeed= -XMP-drone-dji:FlightZSpeed= /prototype/images/incoming/*.jpg
 
 # IN CASE SOURCE CODE CHANGED:
     # Update the code inside container:
@@ -55,20 +87,24 @@
         # cmake ..
         # cmake --build . --parallel
 
-        # NOTE: If your build directory has different CMakeCache.txt, wither rename your source build dir to something like "build-source" and inside container just mkdir build
-        # or create new build dir in container (like "build-cont") and cmake inside this new build dir
-
-        # exit (as we need to mount image incoming directory)
-
+        # NOTE: If your build directory has different CMakeCache.txt, wither rename your source build dir to something 
+        # like "build-source" and inside container just mkdir build or create new build dir in container 
+        # (like "build-cont") and cmake inside this new build dir
+        
 # EXITING
-    # From drone-image-stitching: exit (run from container itself)
-    # From dind: docker stop dind (from host)
+    # From drone-image-stitching: exit (from container itself)
+    # From dind: docker stop dind (from host; can be restarted later)
     # From host: remove dind when not needed: docker rm -f dind
+# ----------------------------------------------------------------------------------------------------
 
 # Base image
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+# Mount point
+ARG PROJECT_MOUNT_POINT=/prototype
+ENV PROJECT_MOUNT_POINT=${PROJECT_MOUNT_POINT}
 
 # Install build dependencies, Docker CLI, and exiftool
 RUN apt-get update && apt-get install -y \
@@ -87,6 +123,12 @@ RUN apt-get update && apt-get install -y \
     exiftool \
     && rm -rf /var/lib/apt/lists/*
 
+# Add user with default parameters
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+RUN groupadd -g ${GROUP_ID} somegroup && \
+    useradd -m -u ${USER_ID} -g ${GROUP_ID} -s /bin/bash someuser
+
 # Install Orfeo Toolbox 9.1.0
 RUN wget https://www.orfeo-toolbox.org/packages/OTB-9.1.0-Linux.tar.gz \
     && mkdir /opt/otb/ \
@@ -99,18 +141,24 @@ RUN wget https://www.orfeo-toolbox.org/packages/OTB-9.1.0-Linux.tar.gz \
 # ENV LD_LIBRARY_PATH=$OTB_HOME/lib:$LD_LIBRARY_PATH
 
 # Set working directory for your project
-# Possibly change name later
-WORKDIR /prototype 
+WORKDIR ${PROJECT_MOUNT_POINT}
 
-# Copy the entire project (make sure Docker build context includes CMakeLists.txt)
-COPY . /prototype
+# Copy the entire project
+COPY . ${PROJECT_MOUNT_POINT}
 
 # Wrapper for OTB
 COPY stitching/otbrun.sh /usr/local/bin/otbrun.sh
 RUN chmod +x /usr/local/bin/otbrun.sh
 
-# Create build directory and build your project
-RUN rm -rf build && mkdir -p build && cd build && cmake .. && cmake --build . --parallel
+# For ODM
+ENV MPLCONFIGDIR=/tmp/matplotlib
+RUN mkdir -p /tmp/matplotlib && chmod 777 /tmp/matplotlib
+
+# Switch to user
+USER someuser
+
+# Create build directory and build your project (unnecessary for development, uncomment on prod)
+#RUN rm -rf build && mkdir -p build && cd build && cmake .. && cmake --build . --parallel
 
 # Expose ports if needed
 EXPOSE 8000
