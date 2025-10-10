@@ -93,14 +93,14 @@ bool BatchProcessor::validateGeotiff(const fs::path& path) {
     return true;
 }
 
-bool BatchProcessor::getRasterInfo(const fs::path& path, double gt[6], std::optional<std::string>& proj_wkt, int& width, int& height) {
+bool BatchProcessor::getRasterInfo(const fs::path& path, double geoTransform[6], std::optional<std::string>& projWkt, int& width, int& height) {
     GDALDatasetRAII dataset((GDALDataset*)GDALOpen(path.string().c_str(), GA_ReadOnly));
     if (!dataset) {
         std::cerr << RED << "[ERROR] Could not open raster: " << path << RESET << std::endl;
         return false;
     }
 
-    if (dataset->GetGeoTransform(gt) != CE_None) {
+    if (dataset->GetGeoTransform(geoTransform) != CE_None) {
         std::cerr << RED << "[ERROR] Could not get geotransform for: " << path << RESET << std::endl;
         return false;
     }
@@ -108,9 +108,9 @@ bool BatchProcessor::getRasterInfo(const fs::path& path, double gt[6], std::opti
     const char* pszWKT = dataset->GetProjectionRef();
     if (pszWKT == nullptr || std::string(pszWKT).empty()) {
         std::cerr << RED << "[WARNING] No projection found for: " << path << RESET << std::endl;
-        proj_wkt = std::nullopt;
+        projWkt = std::nullopt;
     } else {
-        proj_wkt = std::string(pszWKT); // Directly convert to std::string
+        projWkt = std::string(pszWKT); // Directly convert to std::string
     }
 
     width = dataset->GetRasterXSize();
@@ -119,30 +119,31 @@ bool BatchProcessor::getRasterInfo(const fs::path& path, double gt[6], std::opti
     return true;
 }
 
-void BatchProcessor::calculateUnionExtent(double gt1[6], int w1, int h1, double gt2[6], int w2, int h2,
-                                          double& union_minX, double& union_maxY, double& union_maxX, double& union_minY,
-                                          double& avg_resX, double& avg_resY) {
-    auto get_corners = [](double gt[6], int w, int h) -> std::vector<std::pair<double, double>> {
+void BatchProcessor::calculateUnionExtent(double geoTransform1[6], int width1, int height1, 
+                                          double geoTransform2[6], int width2, int height2,
+                                          double& unionMinX, double& unionMaxX, double& unionMinY, double& unionMaxY,
+                                          double& avgResX, double& avgResY) {
+    auto getCorners = [](double geoTransform[6], int width, int height) -> std::vector<std::pair<double, double>> {
         std::vector<std::pair<double, double>> corners;
-        corners.push_back({gt[0], gt[3]}); // Ul: (0,0)
-        corners.push_back({gt[0] + gt[1] * w, gt[3] + gt[4] * w}); // Ur: (w,0)
-        corners.push_back({gt[0] + gt[1] * w + gt[2] * h, gt[3] + gt[4] * w + gt[5] * h}); // Lr: (w,h)
-        corners.push_back({gt[0] + gt[2] * h, gt[3] + gt[5] * h}); // Ll: (0,h)
+        corners.push_back({geoTransform[0], geoTransform[3]}); // Ul: (0,0)
+        corners.push_back({geoTransform[0] + geoTransform[1] * width, geoTransform[3] + geoTransform[4] * width}); // Ur: (w,0)
+        corners.push_back({geoTransform[0] + geoTransform[1] * width + geoTransform[2] * height, geoTransform[3] + geoTransform[4] * width + geoTransform[5] * height}); // Lr: (w,h)
+        corners.push_back({geoTransform[0] + geoTransform[2] * height, geoTransform[3] + geoTransform[5] * height}); // Ll: (0,h)
         return corners;
     };
 
-    std::vector<std::pair<double, double>> corners1 = get_corners(gt1, w1, h1);
-    std::vector<std::pair<double, double>> corners2 = get_corners(gt2, w2, h2);
+    std::vector<std::pair<double, double>> corners1 = getCorners(geoTransform1, width1, height1);
+    std::vector<std::pair<double, double>> corners2 = getCorners(geoTransform2, width2, height2);
 
     std::vector<double> all_xs, all_ys;
     for (const auto& p : corners1) { all_xs.push_back(p.first); all_ys.push_back(p.second); }
     for (const auto& p : corners2) { all_xs.push_back(p.first); all_ys.push_back(p.second); }
 
-    union_minX = *std::min_element(all_xs.begin(), all_xs.end());
-    union_maxX = *std::max_element(all_xs.begin(), all_xs.end());
-    union_minY = *std::min_element(all_ys.begin(), all_ys.end());
-    union_maxY = *std::max_element(all_ys.begin(), all_ys.end());
+    unionMinX = *std::min_element(all_xs.begin(), all_xs.end());
+    unionMaxX = *std::max_element(all_xs.begin(), all_xs.end());
+    unionMinY = *std::min_element(all_ys.begin(), all_ys.end());
+    unionMaxY = *std::max_element(all_ys.begin(), all_ys.end());
 
-    avg_resX = (std::abs(gt1[1]) + std::abs(gt2[1])) / 2.0;
-    avg_resY = (std::abs(gt1[5]) + std::abs(gt2[5])) / 2.0;
+    avgResX = (std::abs(geoTransform1[1]) + std::abs(geoTransform2[1])) / 2.0;
+    avgResY = (std::abs(geoTransform1[5]) + std::abs(geoTransform2[5])) / 2.0;
 }

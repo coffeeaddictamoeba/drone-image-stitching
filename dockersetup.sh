@@ -66,10 +66,12 @@ if ! docker ps -a --format '{{.Names}}' | grep -q "^${DIND_NAME}$"; then
         sleep 2
     done
 else
-    if ! docker ps -q -f name="^${DIND_NAME}$" >/dev/null; then
+    if [ -z "$(docker ps -q -f name="^${DIND_NAME}$")" ]; then
         info "Starting stopped DinD container..."
         docker start "${DIND_NAME}" >/dev/null
-        sleep 5
+        until docker exec "${DIND_NAME}" docker info >/dev/null 2>&1; do
+            sleep 2
+        done
     else
         info "DinD container already running."
     fi
@@ -93,6 +95,5 @@ docker run -it --rm \
   --link "${DIND_NAME}:docker" \
   -v "${PROJECT_DIR}:${PROJECT_MOUNT_POINT}" \
   -e DOCKER_HOST="${DOCKER_HOST_ADDR}" \
-  -e HOST_PROJECT_ROOT="${PROJECT_DIR}" \
   --user "${USER_ID}:${GROUP_ID}" \
   "${APP_IMAGE}"

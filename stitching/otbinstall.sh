@@ -41,6 +41,11 @@ if ! command -v otbcli_Mosaic >/dev/null 2>&1; then
     fi
 fi
 
+if [ "\$#" -eq 0 ]; then
+    echo "Usage: otbrun.sh <otbcli_command> [args]" >&2
+    exit 1
+fi
+
 exec "\$@"
 EOF
 

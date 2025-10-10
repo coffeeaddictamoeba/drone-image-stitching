@@ -31,11 +31,11 @@ struct BatchTask {
 
 class BatchProcessor {
 public:
-    BatchProcessor(const Config& config_ref,
-                   std::queue<BatchTask>& batch_queue,
-                   std::mutex& queue_mutex,
-                   std::condition_variable& queue_cv,
-                   std::atomic<bool>& stop_signal);
+    BatchProcessor(const Config& config,
+                   std::queue<BatchTask>& batchQueue,
+                   std::mutex& queueMutex,
+                   std::condition_variable& queueCV,
+                   std::atomic<bool>& stopSignal);
 
     void processBatchesLoop();
 
@@ -48,18 +48,19 @@ private:
 
     // batchproc.cpp
     fs::path createBatchDirectory(const std::vector<fs::path>& images, int batch_id);
-    fs::path mapBatchPathForOdm(const fs::path& batch_path);
     int runCommand(const std::string& cmd);
-    bool runOdmBatchInternal(const fs::path& batch_path);
-    void mergeWithOTB(const fs::path& ortho_path);
-    bool runOdmBatchSuccessful(const fs::path& batch_path, const fs::path& ortho_path);
+    bool runOdmBatchInternal(const fs::path& batchPath);
+    void mergeWithOTB(const fs::path& orthoPath);
+    bool runOdmBatchSuccessful(const fs::path& batchPath, const fs::path& orthoPath);
+    void savePreviousOrthophoto(std::string &timestamp);
 
     // tiffproc.cpp
     bool validateGeotiff(const fs::path& path);
-    bool getRasterInfo(const fs::path& path, double gt[6], std::optional<std::string>& proj_wkt, int& width, int& height);
-    void calculateUnionExtent(double gt1[6], int w1, int h1, double gt2[6], int w2, int h2,
-                              double& union_minX, double& union_maxY, double& union_maxX, double& union_minY,
-                              double& avg_resX, double& avg_resY);
+    bool getRasterInfo(const fs::path& path, double geoTransform[6], std::optional<std::string>& projWkt, int& width, int& height);
+    void calculateUnionExtent(double geoTransform1[6], int width1, int height1,
+                              double geoTransform2[6], int width2, int height2,
+                              double& unionMinX, double& unionMaxX, double& unionMinY, double& unionMaxY,
+                              double& avgResX, double& avgResY);
 
     std::mutex mosaicMutex_;
 };
