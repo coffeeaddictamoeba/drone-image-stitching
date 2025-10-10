@@ -40,7 +40,6 @@
         # --link dind:docker" \
         # -v /absolute/path/to/your/project/root:/someproject \
         # -e DOCKER_HOST=tcp://docker:2375 \
-        # -e HOST_PROJECT_ROOT=/absolute/path/to/your/project/root \ # (maybe unused)
         # --user $(id -u):$(id -g) \
         # drone-image-stitching
 
@@ -56,8 +55,8 @@
         # (Directory-wise blur) ./deblurring_exec --blur --source-dir /images/incoming/ --target-dir /images/blurred --overwrite-metadata
         # (Directory-wise deblur) ./deblurring_exec --source-dir /images/incoming/ --target-dir /images/deblurred
 
-    # Stitching (needs to be fixed due to dind + multiple file renaming & moving): 
-        # Status: REQUIRES FIX
+    # Stitching: 
+        # Status: REQUIRES TESTS
 
         # Prerequisites: dind (docker-in-docker to run ODM), mounted image incoming directory
 
@@ -74,7 +73,7 @@
         # cd build/stitching
         # (Optional: verify OTB works) otbrun.sh otbcli_Mosaic -help
         # (Optional: verify setup for stitching) ./stitching_exec --is-my-setup-ok
-        # (Does not work for now)./stitching_exec --data /prototype/images --batch-size 15 --wait-batch-size --no-retry --no-bigtiff --save-prev
+        # ./stitching_exec --data /prototype/images --batch-size 15 --wait-batch-size --no-retry --no-bigtiff --save-prev
 
         # In case of using synthetic data clean synthetic metadata:
             # exiftool -FlightPitchDegree= -FlightRollDegree= -FlightYawDegree= -XMP-drone-dji:FlightXSpeed= \
@@ -134,11 +133,6 @@ RUN wget https://www.orfeo-toolbox.org/packages/OTB-9.1.0-Linux.tar.gz \
     && mkdir /opt/otb/ \
     && tar -xzf OTB-9.1.0-Linux.tar.gz -C /opt/otb/ \
     && rm OTB-9.1.0-Linux.tar.gz
-
-# Probably unnecessary
-# ENV OTB_HOME=/opt/otb
-# ENV PATH=$OTB_HOME/bin:$PATH
-# ENV LD_LIBRARY_PATH=$OTB_HOME/lib:$LD_LIBRARY_PATH
 
 # Set working directory for your project
 WORKDIR ${PROJECT_MOUNT_POINT}

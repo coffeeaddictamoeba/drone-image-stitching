@@ -26,6 +26,18 @@ BatchProcessor::BatchProcessor(const Config& config, std::queue<BatchTask>& batc
     fs::create_directories(config_.stitchedDir);
 }
 
+// add checking image status by this later to avoid processing the same image twice
+void BatchProcessor::setProcessedStatusToImages(const fs::path& imagesDir) {
+    for (const auto& img : fs::directory_iterator(imagesDir)) {
+        try {
+            std::string cmd = "exiftool -overwrite_original -" + config_.exifTagProcessed + "=\"Processed\" " + img.path().string();
+            runCommand(cmd);
+        } catch (const fs::filesystem_error& e) {
+            std::cerr << RED << "[ERROR] Failed to tag image " << img << ": " << e.what() << RESET << std::endl;
+        }
+    }
+}
+
 void BatchProcessor::processBatchesLoop() {
     while (!stopSignal_.load()) {
         std::unique_lock<std::mutex> lock(queueMutex_);
@@ -48,7 +60,8 @@ void BatchProcessor::processBatchesLoop() {
         fs::path batchPath = createBatchDirectory(task.images, task.batch_id);
         fs::path orthoPath = batchPath / "odm_orthophoto" / "odm_orthophoto.tif";
 
-        if (runOdmBatchSuccessful(batchPath, orthoPath)) {
+        bool isBatchSuccessful = runOdmBatchSuccessful(batchPath, orthoPath);
+        if (isBatchSuccessful) {
             mergeWithOTB(orthoPath);
         } else {
             std::cerr << RED << "[FATAL] Batch failed after " << config_.retries << " retries: " << batchPath << RESET << std::endl;
@@ -56,7 +69,14 @@ void BatchProcessor::processBatchesLoop() {
 
         // cleanup
         for (const auto& entry : fs::directory_iterator(batchPath)) {
-            if (entry.path().filename() == "images") continue;
+            if (entry.path().filename() == "images") {
+                // assign "processed" tag to images only after successful processing
+                if (isBatchSuccessful) {
+                    setProcessedStatusToImages(entry.path());
+                }
+                continue;
+            }
+
             try {
                 fs::remove_all(entry.path());
             } catch (const fs::filesystem_error& e) {
@@ -78,7 +98,7 @@ fs::path BatchProcessor::createBatchDirectory(const std::vector<fs::path>& image
     
     for (const auto& img : images) {
         try {
-            fs::rename(img, batchImagesPath / img.filename()); // + add/check metadata tag of being processed?
+            fs::rename(img, batchImagesPath / img.filename());
         } catch (const fs::filesystem_error& e) {
             std::cerr << RED << "[ERROR] Failed to move image " << img << " to batch " << batchImagesPath << ": " << e.what() << RESET << std::endl;
         }
@@ -375,13 +395,21 @@ bool BatchProcessor::runOdmBatchSuccessful(const fs::path& batchPath, const fs::
                     break;
             }
             
+            // cleanup
             try {
                 if (fs::exists(batchPath / "odm_orthophoto")) {
-                    fs::remove_all(batchPath / "odm_orthophoto");
-                    std::cout << "[DEBUG] Cleaned partial ODM output for retry: " << (batchPath / "odm_orthophoto") << std::endl;
+                    for (const auto& entry : fs::directory_iterator(batchPath)) {
+                        if (entry.path().filename() == "images") continue;
+                        try {
+                            fs::remove_all(entry.path());
+                        } catch (const fs::filesystem_error& e) {
+                            std::cerr << RED << "[ERROR] Failed to remove " << entry.path() << ": " << e.what() << RESET << std::endl;
+                        }
+                    }
+                    std::cout << "[DEBUG] Cleaned ODM output for retry: " << (batchPath) << std::endl;
                 }
             } catch (const fs::filesystem_error& e) {
-                std::cerr << RED << "[ERROR] Failed to clean partial ODM output for retry: " << e.what() << RESET << std::endl;
+                std::cerr << RED << "[ERROR] Failed to clean ODM output for retry: " << e.what() << RESET << std::endl;
             }
 
             ++retryCount;

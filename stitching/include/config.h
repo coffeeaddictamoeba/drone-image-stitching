@@ -25,6 +25,7 @@ struct Config {
     bool savePreviousOrthophoto = false;
     double rgbValidationThreshold = 25.0;
     double alphaValidationThreshold = 0.1;
+    std::string exifTagProcessed = "UserComment";
 };
 
 #endif

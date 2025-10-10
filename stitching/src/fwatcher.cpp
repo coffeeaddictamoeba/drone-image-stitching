@@ -2,8 +2,12 @@
 #include <algorithm>
 #include <thread>
 
-FolderWatcher::FolderWatcher(const Config& config_ref, std::queue<BatchTask>& batch_queue, std::mutex& queue_mutex, std::condition_variable& queue_cv, std::atomic<bool>& stop_signal)
-    : config_(config_ref), batchQueue_(batch_queue), queueMutex_(queue_mutex), queueCV_(queue_cv), stopSignal_(stop_signal) {
+FolderWatcher::FolderWatcher(const Config& config, std::queue<BatchTask>& batchQueue, std::mutex& queueMutex, std::condition_variable& queueCV, std::atomic<bool>& stopSignal)
+    : config_(config), 
+    batchQueue_(batchQueue), 
+    queueMutex_(queueMutex), 
+    queueCV_(queueCV), 
+    stopSignal_(stopSignal) {
     fs::create_directories(config_.incomingDir);
 }
 
@@ -14,24 +18,24 @@ inline bool FolderWatcher::isJpg(const fs::path& p) {
 }
 
 void FolderWatcher::watchFolderLoop() {
-    int next_batch_id = 1;
+    int nextBatchId = 1;
     while (!stopSignal_) {
-        std::vector<fs::path> new_images;
+        std::vector<fs::path> newImages;
 
         for (const auto& entry : fs::directory_iterator(config_.incomingDir)) {
             if (isJpg(entry.path()) && seenFiles_.find(entry.path()) == seenFiles_.end()) {
                 // potential improvement: check if file is fully written (e.g., by size stability)
-                new_images.push_back(entry.path());
+                newImages.push_back(entry.path());
             }
         }
 
         {
             std::lock_guard<std::mutex> lock(queueMutex_);
 
-            if (!new_images.empty()) {
-                imageBuffer_.insert(imageBuffer_.end(), new_images.begin(), new_images.end());
-                for (const auto& img_path : new_images) {
-                    seenFiles_.insert(img_path);
+            if (!newImages.empty()) {
+                imageBuffer_.insert(imageBuffer_.end(), newImages.begin(), newImages.end());
+                for (const auto& imagePath : newImages) {
+                    seenFiles_.insert(imagePath);
                 }
 
                 if (!bufferStartTime_.has_value()) {
@@ -43,8 +47,8 @@ void FolderWatcher::watchFolderLoop() {
 
             // Condition 1: Batch size reached
             while (imageBuffer_.size() >= config_.batchSize) {
-                std::vector<fs::path> batch_images(imageBuffer_.begin(), imageBuffer_.begin() + config_.batchSize);
-                batchQueue_.push({batch_images, next_batch_id++}); // Push a BatchTask
+                std::vector<fs::path> batchImages(imageBuffer_.begin(), imageBuffer_.begin() + config_.batchSize);
+                batchQueue_.push({batchImages, nextBatchId++}); // Push a BatchTask
                 imageBuffer_.erase(imageBuffer_.begin(), imageBuffer_.begin() + config_.batchSize);
                 queueCV_.notify_one();
 
@@ -58,10 +62,10 @@ void FolderWatcher::watchFolderLoop() {
 
             // Condition 2: Timeout reached for accumulated images (if not waiting for full batch size)
             if (!config_.waitForBatchSize && bufferStartTime_.has_value() &&
-                (now - *bufferStartTime_ >= std::chrono::seconds(config_.batchTimeoutSec)) &&
+                (now - *bufferStartTime_ >= std::chrono::seconds(config_.batchTimeoutSec)) && // fix timer bug
                 !imageBuffer_.empty()) {
 
-                batchQueue_.push({imageBuffer_, next_batch_id++});
+                batchQueue_.push({imageBuffer_, nextBatchId++});
                 imageBuffer_.clear();
                 bufferStartTime_ = std::nullopt;
                 queueCV_.notify_one();

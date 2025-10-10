@@ -53,6 +53,7 @@ private:
     void mergeWithOTB(const fs::path& orthoPath);
     bool runOdmBatchSuccessful(const fs::path& batchPath, const fs::path& orthoPath);
     void savePreviousOrthophoto(std::string &timestamp);
+    void setProcessedStatusToImages(const fs::path& imagesDir);
 
     // tiffproc.cpp
     bool validateGeotiff(const fs::path& path);
