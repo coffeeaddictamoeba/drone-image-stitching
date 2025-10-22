@@ -279,7 +279,7 @@ float Deblurrer::findBlurLength(const std::string &imagePath, float &blurAngleRa
 void Deblurrer::findVBodies(const std::unordered_map<std::string, std::string> &metadata, float &Vx, float &Vy, float &Vz, float &speed) {
     float speedX, speedY, speedZ, yawRad, pitchRad, rollRad, exposure, gpsImgDirection;
 
-    getPitchRollYawDeg(metadata, pitchRad, rollRad, yawRad);
+    getPitchRollYawRad(metadata, pitchRad, rollRad, yawRad);
     getSpeedXYZ(metadata, speedX, speedY, speedZ); // in case where only GPS Speed is present, the result is stored in speedX
 
     float cy = std::cos(yawRad);   float sy = std::sin(yawRad);
@@ -300,7 +300,7 @@ void Deblurrer::findVBodies(const std::unordered_map<std::string, std::string> &
         Vz = speedX * (cr * sp * cy + sr * sy) + speedY * (cr * sp * sy - sr * cy) + speedZ * (cr * cp);
         speed = std::sqrt(Vy * Vy + Vz * Vz);
     } else {
-        gpsImgDirection = getGPSImgDirectionDeg(metadata); // radians
+        gpsImgDirection = getGPSImgDirectionRad(metadata); // radians
 
         float vx = std::cos(gpsImgDirection);
         float vy = std::sin(gpsImgDirection);

@@ -53,4 +53,16 @@ inline std::string escapeQuotes(const std::string &s) {
     return out;
 }
 
+inline std::string getExtension(const std::string &filepath) {
+    size_t extensionStart = filepath.find_last_of('.');
+    std::string imageName = filepath.substr(0, extensionStart);
+    return filepath.substr(extensionStart, filepath.size());
+}
+
+inline bool isJPG(const std::string &filepath) {
+    auto ext = getExtension(filepath);
+    for (auto& c : ext) c = std::tolower(c);
+    return ext == ".jpg" || ext == ".jpeg";
+}
+
 #endif

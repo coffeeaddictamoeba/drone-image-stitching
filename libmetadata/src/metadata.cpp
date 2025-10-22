@@ -155,7 +155,7 @@ float parseExifGPSSpeed(const std::string &gpsspeed_str, const std::string &gpss
 }
 
 // finds Pitch, Roll and Yaw from metadata in radians
-void getPitchRollYawDeg(const std::unordered_map<std::string, std::string>& metadata, float &pitchRad, float &rollRad, float &yawRad) {
+void getPitchRollYawRad(const std::unordered_map<std::string, std::string>& metadata, float &pitchRad, float &rollRad, float &yawRad) {
     float yaw = 0.0f, pitch = 0.0f, roll = 0.0f;
     parseFloatFromMetadata(metadata, "Flight Yaw Degree", yaw);
     parseFloatFromMetadata(metadata, "Flight Pitch Degree", pitch);
@@ -164,6 +164,14 @@ void getPitchRollYawDeg(const std::unordered_map<std::string, std::string>& meta
     yawRad = yaw * static_cast<float>(M_PI / 180.0f);
     pitchRad = pitch * static_cast<float>(M_PI / 180.0f);
     rollRad = roll * static_cast<float>(M_PI / 180.0f);
+}
+
+// finds Pitch, Roll and Yaw from metadata
+void getPitchRollYaw(const std::unordered_map<std::string, std::string>& metadata, float &pitch, float &roll, float &yaw) {
+    yaw = 0.0f, pitch = 0.0f, roll = 0.0f;
+    parseFloatFromMetadata(metadata, "Flight Yaw Degree", yaw);
+    parseFloatFromMetadata(metadata, "Flight Pitch Degree", pitch);
+    parseFloatFromMetadata(metadata, "Flight Roll Degree", roll);
 }
 
 // Finds Drone Speed (both 3D Speed, m/s and Overall Speed, m/s are valid)
@@ -223,12 +231,21 @@ float findGSD(const std::unordered_map<std::string, std::string>& metadata, floa
 }
 
 // Finds GPS Image Direction (in case of Overall Speed) in radians
-float getGPSImgDirectionDeg(const std::unordered_map<std::string, std::string> &metadata) {
+float getGPSImgDirectionRad(const std::unordered_map<std::string, std::string> &metadata) {
     float gpsImgDirection = 0.0f;
     if (!parseFloatFromMetadata(metadata, "GPS Img Direction", gpsImgDirection)) {
         std::cerr << RED << "[Error] Missing essential metadata for GSD computation." << RESET << std::endl;
     }
     return gpsImgDirection * static_cast<float>(M_PI) / 180.0f;
+}
+
+// Finds GPS Image Direction (in case of Overall Speed)
+float getGPSImgDirection(const std::unordered_map<std::string, std::string> &metadata) {
+    float gpsImgDirection = 0.0f;
+    if (!parseFloatFromMetadata(metadata, "GPS Img Direction", gpsImgDirection)) {
+        std::cerr << RED << "[Error] Missing essential metadata for GSD computation." << RESET << std::endl;
+    }
+    return gpsImgDirection;
 }
 
 void listMetadata() {

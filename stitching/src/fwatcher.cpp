@@ -1,4 +1,5 @@
 #include "../include/fwatcher.h"
+#include "helpers.h"
 #include <algorithm>
 #include <thread>
 
@@ -11,19 +12,13 @@ FolderWatcher::FolderWatcher(const Config& config, std::queue<BatchTask>& batchQ
     fs::create_directories(config_.incomingDir);
 }
 
-inline bool FolderWatcher::isJpg(const fs::path& p) {
-    auto ext = p.extension().string();
-    for (auto& c : ext) c = std::tolower(c);
-    return ext == ".jpg" || ext == ".jpeg";
-}
-
 void FolderWatcher::watchFolderLoop() {
     int nextBatchId = 1;
     while (!stopSignal_) {
         std::vector<fs::path> newImages;
 
         for (const auto& entry : fs::directory_iterator(config_.incomingDir)) {
-            if (isJpg(entry.path()) && seenFiles_.find(entry.path()) == seenFiles_.end()) {
+            if (isJPG(entry.path().string()) && seenFiles_.find(entry.path()) == seenFiles_.end()) {
                 // potential improvement: check if file is fully written (e.g., by size stability)
                 newImages.push_back(entry.path());
             }
