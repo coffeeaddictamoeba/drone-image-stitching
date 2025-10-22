@@ -6,7 +6,6 @@
 #include <cstddef>
 #include <variant>
 
-
 inline std::string constructPathWithPrefix(const std::string &originalPath, const std::string &prefix) {
     size_t extensionStart = originalPath.find_last_of('.');
     std::string imageName = originalPath.substr(0, extensionStart);

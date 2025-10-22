@@ -1,3 +1,4 @@
+#include <cmath>
 #include <iostream>
 #include <sstream>
 #include <unordered_map>
@@ -151,6 +152,83 @@ float parseExifGPSSpeed(const std::string &gpsspeed_str, const std::string &gpss
         std::cout << YELLOW << "[Warn] GPS speed assumed in m/s: " << speed << RESET <<"\n";
         return speed;
     }
+}
+
+// finds Pitch, Roll and Yaw from metadata in radians
+void getPitchRollYawDeg(const std::unordered_map<std::string, std::string>& metadata, float &pitchRad, float &rollRad, float &yawRad) {
+    float yaw = 0.0f, pitch = 0.0f, roll = 0.0f;
+    parseFloatFromMetadata(metadata, "Flight Yaw Degree", yaw);
+    parseFloatFromMetadata(metadata, "Flight Pitch Degree", pitch);
+    parseFloatFromMetadata(metadata, "Flight Roll Degree", roll);
+
+    yawRad = yaw * static_cast<float>(M_PI / 180.0f);
+    pitchRad = pitch * static_cast<float>(M_PI / 180.0f);
+    rollRad = roll * static_cast<float>(M_PI / 180.0f);
+}
+
+// Finds Drone Speed (both 3D Speed, m/s and Overall Speed, m/s are valid)
+void getSpeedXYZ(const std::unordered_map<std::string, std::string>& metadata, float &speedX, float &speedY, float &speedZ) {
+    bool hasX = parseFloatFromMetadata(metadata, "Flight X Speed", speedX);
+    bool hasY = parseFloatFromMetadata(metadata, "Flight Y Speed", speedY);
+    bool hasZ = parseFloatFromMetadata(metadata, "Flight Z Speed", speedZ);
+
+    if (!hasX || !hasY || !hasZ) {
+        float gpsSpeed = 0.0f;
+        std::string gpsRef;
+        parseFloatFromMetadata(metadata, "GPS Speed", gpsSpeed);
+        auto it = metadata.find("GPS Speed Ref");
+        gpsRef = (it != metadata.end()) ? it->second : "N"; // default
+
+        speedX = gpsSpeed; 
+        speedY = 0.0f; 
+        speedZ = 0.0f;
+        std::cout << YELLOW << "[Warn] Using GPS speed fallback: " << speedX << " m/s" << RESET << std::endl;
+    }
+}
+
+// calculate ground sample distance (GSD)
+float findGSD(float altitude, float focalLength, int imageWidth, int imageHeight, float sensorWidth = 3.68f, float sensorHeight = 2.76f) {
+    altitude *= 1000.0f; // m -> mm
+
+    float gsdWidth = (altitude * sensorWidth) / (focalLength * imageWidth);    // mm/px
+    float gsdHeight = (altitude * sensorHeight) / (focalLength * imageHeight); // mm/px
+
+    float gsd = std::max(gsdWidth, gsdHeight); // mm/px
+
+    #ifdef DEBUG
+        std::cout << "[Info] GSD: Calculated GSD = " << gsd << " mm/px\n";
+        std::cout << "  Focal Length: " << focalLength << " mm\n";
+        std::cout << "  Sensor Size: " << sensorWidth << "x" << sensorHeight << " mm\n";
+        std::cout << "  Image Resolution: " << imageWidth << "x" << imageHeight << " px\n";
+        std::cout << "  Altitude: " << altitude << " mm\n";
+    #endif
+
+    return gsd;
+}
+
+// Finds GSD from given metadata (mm/px)
+float findGSD(const std::unordered_map<std::string, std::string>& metadata, float sensorWidth = 3.68f, float sensorHeight = 2.76f) {
+    float alt = 0, flen = 0;
+    int width = 0, height = 0;
+
+    if (!parseFloatFromMetadata(metadata, "GPS Altitude", alt) ||
+        !parseFloatFromMetadata(metadata, "Focal Length", flen) ||
+        !parseIntFromMetadata(metadata, "Image Width", width) ||
+        !parseIntFromMetadata(metadata, "Image Height", height)) {
+        std::cerr << RED << "[Error] Missing essential metadata for GSD computation." << RESET << std::endl;
+        return 1.0f; // fallback (1 mm/px)
+    }
+
+    return findGSD(alt, flen, width, height, sensorWidth, sensorHeight);
+}
+
+// Finds GPS Image Direction (in case of Overall Speed) in radians
+float getGPSImgDirectionDeg(const std::unordered_map<std::string, std::string> &metadata) {
+    float gpsImgDirection = 0.0f;
+    if (!parseFloatFromMetadata(metadata, "GPS Img Direction", gpsImgDirection)) {
+        std::cerr << RED << "[Error] Missing essential metadata for GSD computation." << RESET << std::endl;
+    }
+    return gpsImgDirection * static_cast<float>(M_PI) / 180.0f;
 }
 
 void listMetadata() {

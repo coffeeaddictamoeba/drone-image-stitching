@@ -1,6 +1,6 @@
 #include "../include/deblur.h"
-#include "../include/helpers.h"
 #include "../include/monitor.h"
+#include "helpers.h"
 #include <csignal>
 #include <cstring>
 #include <exception>

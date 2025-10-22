@@ -121,14 +121,19 @@ void listMetadata();
 
 // metadata operations
 std::unordered_map<std::string, std::string> extractImageMetadata(const std::string& imagePath);
-void copyMetadata(const std::string& sourceImagePath, const std::string& destImagePath);
-void assignMetadata(const std::string& imagePath, const std::unordered_map<std::string, std::string>& tags);
 std::string extractExifTagValue(const std::string& imagePath, const std::string& tagName);
 
-// parsing operations
-float parseExifExposureTime(const std::string &exposure_str);
-float parseExifGPSSpeed(const std::string &gpsspeed_str, const std::string &gpsspeedref_str);
+void copyMetadata(const std::string& sourceImagePath, const std::string& destImagePath);
+void assignMetadata(const std::string& imagePath, const std::unordered_map<std::string, std::string>& tags);
 
+void getPitchRollYawDeg(const std::unordered_map<std::string, std::string> &metadata, float &pitchRad, float &rollRad, float &yawRad);
+void getSpeedXYZ(const std::unordered_map<std::string, std::string> &metadata, float &speedX, float &speedY, float &speedZ);
+float getGPSImgDirectionDeg(const std::unordered_map<std::string, std::string> &metadata);
+
+float findGSD(float altitude, float focalLength, int imageWidth, int imageHeight, float sensorWidth, float sensorHeight);
+float findGSD(const std::unordered_map<std::string, std::string> &metadata, float sensorWidth, float sensorHeight);
+
+// parsers
 inline bool parseFloatFromMetadata(const std::unordered_map<std::string,std::string>& metadata, const std::string& key, float& value) {
     auto it = metadata.find(key);
     if (it == metadata.end()) return false;
@@ -150,5 +155,8 @@ inline bool parseIntFromMetadata(const std::unordered_map<std::string,std::strin
         return false;
     }
 }
+
+float parseExifExposureTime(const std::string &exposure_str);
+float parseExifGPSSpeed(const std::string &gpsspeed_str, const std::string &gpsspeedref_str);
 
 #endif

@@ -18,6 +18,9 @@ target_include_directories(deblurring_exec PRIVATE
     ${OpenCV_INCLUDE_DIRS}
 )
 
-target_link_libraries(deblurring_exec PRIVATE
-    ${OpenCV_LIBS}
+target_link_libraries(deblurring_exec 
+    PUBLIC
+        libmetadata::libmetadata
+    PRIVATE
+        ${OpenCV_LIBS}
 )

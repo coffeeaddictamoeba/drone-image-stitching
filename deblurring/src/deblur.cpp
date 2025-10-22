@@ -1,6 +1,7 @@
+#include "metadata.h"
+#include "helpers.h"
+
 #include "../include/deblur.h"
-#include "../include/helpers.h"
-#include "../include/metadata.h"
 
 #include <opencv2/core/ocl.hpp>
 #include <opencv2/imgproc.hpp>
@@ -21,7 +22,6 @@
 #define RED     "\033[31m"      // Errors
 #define YELLOW  "\033[33m"      // Warnings
 #define GREEN   "\033[32m"      // Success
-
 
 
 namespace fs = std::filesystem;
@@ -257,7 +257,7 @@ float Deblurrer::findBlurLength(const std::string &imagePath, float &blurAngleRa
     try {
         // Exposure Time in EXIF format most of the time looks like "1/10", so it is important to parse it properly
         float exposure = parseExifExposureTime(metadata["Exposure Time"]);
-        float gsd = findGSDFromMetadata(metadata);
+        float gsd = findGSD(metadata, config_.sensorWidth, config_.sensorHeight);
     
         float Vx, Vy, Vz, speed;
         findVBodies(metadata, Vx, Vy, Vz, speed);
@@ -276,93 +276,15 @@ float Deblurrer::findBlurLength(const std::string &imagePath, float &blurAngleRa
     }
 }
 
-// Finds Pitch, Roll and Yaw from metadata in radians
-void Deblurrer::findPitchRollYawFromMetadata(const std::unordered_map<std::string, std::string>& metadata, float &pitchRad, float &rollRad, float &yawRad) {
-    float yaw = 0.0f, pitch = 0.0f, roll = 0.0f;
-    parseFloatFromMetadata(metadata, "Flight Yaw Degree", yaw);
-    parseFloatFromMetadata(metadata, "Flight Pitch Degree", pitch);
-    parseFloatFromMetadata(metadata, "Flight Roll Degree", roll);
-
-    yawRad = yaw * static_cast<float>(CV_PI / 180.0f);
-    pitchRad = pitch * static_cast<float>(CV_PI / 180.0f);
-    rollRad = roll * static_cast<float>(CV_PI / 180.0f);
-}
-
-
-// Finds Drone Speed (both 3D Speed, m/s and Overall Speed, m/s are valid)
-void Deblurrer::findSpeedFromMetadata(const std::unordered_map<std::string, std::string>& metadata, float &speedX, float &speedY, float &speedZ) {
-    bool hasX = parseFloatFromMetadata(metadata, "Flight X Speed", speedX);
-    bool hasY = parseFloatFromMetadata(metadata, "Flight Y Speed", speedY);
-    bool hasZ = parseFloatFromMetadata(metadata, "Flight Z Speed", speedZ);
-
-    if (!hasX || !hasY || !hasZ) {
-        float gpsSpeed = 0.0f;
-        std::string gpsRef;
-        parseFloatFromMetadata(metadata, "GPS Speed", gpsSpeed);
-        auto it = metadata.find("GPS Speed Ref");
-        gpsRef = (it != metadata.end()) ? it->second : "N"; // default
-
-        speedX = gpsSpeed; 
-        speedY = 0.0f; 
-        speedZ = 0.0f;
-        std::cout << YELLOW << "[Warn] Using GPS speed fallback: " << speedX << " m/s" << RESET << std::endl;
-    }
-}
-
-// Calculate ground sample distance (GSD)
-float Deblurrer::calculateGSD(float altitude, float focalLength, int imageWidth, int imageHeight, float sensorWidth = 3.68f, float sensorHeight = 2.76f) {
-    altitude *= 1000.0f; // m -> mm
-
-    float gsdWidth = (altitude * sensorWidth) / (focalLength * imageWidth);    // mm/px
-    float gsdHeight = (altitude * sensorHeight) / (focalLength * imageHeight); // mm/px
-
-    float gsd = std::max(gsdWidth, gsdHeight); // mm/px
-
-    #ifdef DEBUG
-        std::cout << "[Info] GSD: Calculated GSD = " << gsd << " mm/px\n";
-        std::cout << "  Focal Length: " << focalLength << " mm\n";
-        std::cout << "  Sensor Size: " << sensorWidth << "x" << sensorHeight << " mm\n";
-        std::cout << "  Image Resolution: " << imageWidth << "x" << imageHeight << " px\n";
-        std::cout << "  Altitude: " << altitude << " mm\n";
-    #endif
-
-    return gsd;
-}
-
-// Finds GSD from given metadata (mm/px)
-float Deblurrer::findGSDFromMetadata(const std::unordered_map<std::string, std::string>& metadata) {
-    float alt = 0, flen = 0;
-    int width = 0, height = 0;
-
-    if (!parseFloatFromMetadata(metadata, "GPS Altitude", alt) ||
-        !parseFloatFromMetadata(metadata, "Focal Length", flen) ||
-        !parseIntFromMetadata(metadata, "Image Width", width) ||
-        !parseIntFromMetadata(metadata, "Image Height", height)) {
-        std::cerr << RED << "[Error] Missing essential metadata for GSD computation." << RESET << std::endl;
-        return 1.0f; // fallback (1 mm/px)
-    }
-
-    return calculateGSD(alt, flen, width, height, config_.sensorWidth, config_.sensorHeight);
-}
-
-// Finds GPS Image Direction (in case of Overall Speed) in radians
-float Deblurrer::findGPSImgDirectionFromMetadata(const std::unordered_map<std::string, std::string> &metadata) {
-    float gpsImgDirection = 0.0f;
-    if (!parseFloatFromMetadata(metadata, "GPS Img Direction", gpsImgDirection)) {
-        std::cerr << RED << "[Error] Missing essential metadata for GSD computation." << RESET << std::endl;
-    }
-    return gpsImgDirection * static_cast<float>(CV_PI) / 180.0f;
-}
-
 void Deblurrer::findVBodies(const std::unordered_map<std::string, std::string> &metadata, float &Vx, float &Vy, float &Vz, float &speed) {
     float speedX, speedY, speedZ, yawRad, pitchRad, rollRad, exposure, gpsImgDirection;
 
-    findPitchRollYawFromMetadata(metadata, pitchRad, rollRad, yawRad);
-    findSpeedFromMetadata(metadata, speedX, speedY, speedZ); // in case where only GPS Speed is present, the result is stored in speedX
+    getPitchRollYawDeg(metadata, pitchRad, rollRad, yawRad);
+    getSpeedXYZ(metadata, speedX, speedY, speedZ); // in case where only GPS Speed is present, the result is stored in speedX
 
-    float cy = std::cos(yawRad); float sy = std::sin(yawRad);
+    float cy = std::cos(yawRad);   float sy = std::sin(yawRad);
     float cp = std::cos(pitchRad); float sp = std::sin(pitchRad);
-    float cr = std::cos(rollRad); float sr = std::sin(rollRad);
+    float cr = std::cos(rollRad);  float sr = std::sin(rollRad);
 
     // This is the rotation matrix from World (NED) to Body frame (ZYX Euler sequence):
     // R = Rx(roll) * Ry(pitch) * Rz(yaw)
@@ -371,13 +293,14 @@ void Deblurrer::findVBodies(const std::unordered_map<std::string, std::string> &
     // Vx body - (forward/optical axis component) -> low influence on blur
     // Vy body - (right component in body frame, perpendicular to optical axis)
     // Vz body - (down component in body frame, perpendicular to optical axis)
+
     if (std::abs(speedX) > 1e-6f || std::abs(speedY) > 1e-6f || std::abs(speedZ) > 1e-6f) {
         // Vx = speedX * (cp * cy) + speedY * (cp * sy) + speedZ * (-sp); // not used in calculations
         Vy = speedX * (sr * sp * cy - cr * sy) + speedY * (sr * sp * sy + cr * cy) + speedZ * (sr * cp);
         Vz = speedX * (cr * sp * cy + sr * sy) + speedY * (cr * sp * sy - sr * cy) + speedZ * (cr * cp);
         speed = std::sqrt(Vy * Vy + Vz * Vz);
     } else {
-        gpsImgDirection = findGPSImgDirectionFromMetadata(metadata); // radians
+        gpsImgDirection = getGPSImgDirectionDeg(metadata); // radians
 
         float vx = std::cos(gpsImgDirection);
         float vy = std::sin(gpsImgDirection);
@@ -744,7 +667,7 @@ void Deblurrer::denoiseImage(cv::Mat& image, float strength = 10.0f, float edgeS
         tempImage.convertTo(image, image.type(), 1.0 / 255.0);
     } else {
         image = tempImage;
-    }
+    }_blurred
 }
 
 void Deblurrer::deblurImage(const std::string &inputImagePath, float snr = 1500.0) {

@@ -10,6 +10,7 @@
 
 #include <thread>
 #include <fstream>
+#include <sstream>
 
 #define RESET   "\033[0m"
 #define RED     "\033[31m"      // Errors
@@ -30,9 +31,9 @@ BatchProcessor::BatchProcessor(const Config& config, std::queue<BatchTask>& batc
 void BatchProcessor::setProcessedStatusToImages(const fs::path& imagesDir) {
     for (const auto& img : fs::directory_iterator(imagesDir)) {
         try {
-            std::string cmd = "exiftool -overwrite_original -" + config_.exifTagProcessed + "=\"Processed\" " + img.path().string();
+            std::string cmd = "exiftool -overwrite_original -" + config_.exifTagProcessed + "=\"Processed\" " + img.path().string() + " >/dev/null 2>&1 ";
             runCommand(cmd);
-        } catch (const fs::filesystem_error& e) {
+        } catch (const std::exception& e) {
             std::cerr << RED << "[ERROR] Failed to tag image " << img << ": " << e.what() << RESET << std::endl;
         }
     }
@@ -184,9 +185,8 @@ void BatchProcessor::savePreviousOrthophoto(std::string &timestamp) {
 void BatchProcessor::mergeWithOTB(const fs::path& orthoPath) {
     std::lock_guard<std::mutex> lock(mosaicMutex_);
 
-    // Set timestamp
     std::stringstream tss;
-    auto now   = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     tss << std::put_time(std::localtime(&now), "%Y%m%d_%H%M%S");
     std::string timestamp = tss.str();
 
@@ -232,11 +232,11 @@ void BatchProcessor::mergeWithOTB(const fs::path& orthoPath) {
     calculateUnionExtent(
         mosaicGeoTransform, mosaicWidth, mosaicHeight,
         newMosaicGeoTransform, newMosaicWidth, newMosaicHeight,
-        unionMinX, unionMaxX,  
-        unionMinY, unionMaxY,
+        unionMinX, unionMaxX, unionMinY, unionMaxY,
         avgResX, avgResY
     );
 
+    // Write mosaic WKT
     fs::path mosaicWktTempPath = config_.stitchedDir + '/' + ("mosaic_proj_" + timestamp + ".wkt");
     TemporaryPath mosaicWktTempFile(mosaicWktTempPath);
     {
@@ -249,6 +249,7 @@ void BatchProcessor::mergeWithOTB(const fs::path& orthoPath) {
         wktfile.close();
     }
 
+    // Warp new orthophoto to mosaic CRS & bounds
     fs::path newMosaicWarpedExpandedPath = config_.stitchedDir + '/' + ("new_ortho_warped_expanded_" + timestamp + ".tif");
     TemporaryPath newMosaicWarpedExpandedFile(newMosaicWarpedExpandedPath);
     {
@@ -275,6 +276,7 @@ void BatchProcessor::mergeWithOTB(const fs::path& orthoPath) {
         std::cout << "[INFO] New orthophoto warped and expanded to: " << newMosaicWarpedExpandedFile.get_path() << std::endl;
     }
 
+    // Blend realigned image with mosaic
     fs::path mosaicTempUnoptimizedPath = config_.stitchedDir + '/' + ("tmp_mosaic_unoptimized_" + timestamp + ".tif");
     TemporaryPath mosaicTempUnoptimizedFile(mosaicTempUnoptimizedPath);
     {
@@ -298,6 +300,7 @@ void BatchProcessor::mergeWithOTB(const fs::path& orthoPath) {
         }
     }
 
+    // Optimize final mosaic
     fs::path mosaicTempOptimizedPath = config_.stitchedDir + '/' + ("tmp_mosaic_optimized_" + timestamp + ".tif");
     TemporaryPath mosaicTempOptimizedFile(mosaicTempOptimizedPath);
     {
@@ -338,8 +341,8 @@ bool BatchProcessor::runOdmBatchSuccessful(const fs::path& batchPath, const fs::
     std::size_t retryCount = 0;
     std::size_t effectiveRetries = config_.retry ? config_.retries : 1;
 
-    while (retryCount < effectiveRetries && !stopSignal_) {
-        std::cout << "[INFO] Processing batch (attempt #" << retryCount + 1 << " of " << effectiveRetries << "): " << batchPath << std::endl;
+    while (retryCount <= effectiveRetries && !stopSignal_) {
+        std::cout << "[INFO] Processing batch (attempt #" << retryCount + 1 << " of " << effectiveRetries + 1 << "): " << batchPath << std::endl;
 
         if (stopSignal_.load()) break;
 
