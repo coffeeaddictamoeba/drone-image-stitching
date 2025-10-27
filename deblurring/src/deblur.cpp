@@ -667,7 +667,7 @@ void Deblurrer::denoiseImage(cv::Mat& image, float strength = 10.0f, float edgeS
         tempImage.convertTo(image, image.type(), 1.0 / 255.0);
     } else {
         image = tempImage;
-    }_blurred
+    }
 }
 
 void Deblurrer::deblurImage(const std::string &inputImagePath, float snr = 1500.0) {

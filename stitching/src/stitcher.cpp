@@ -88,12 +88,12 @@ void MosaicStitcher::isMySetupOkay() {
     }
 
     // Orfeo Toolbox
-    if (isCommandAvailable("otbrun.sh")) {
+    if (isCommandAvailable("otbcli_Mosaic")) {
         std::cout << "\nCheck Orfeo Toolbox availability: \n";
-        execCommand("otbrun.sh otbcli_Mosaic -version");
+        execCommand("otbcli_Mosaic -version");
         std::cout << "\n";
     } else {
-        std::cout << "[Orfeo Toolbox] Missing (wrapper not found)\n";
+        std::cout << "[Orfeo Toolbox] Missing\n";
     }
 
     // Docker

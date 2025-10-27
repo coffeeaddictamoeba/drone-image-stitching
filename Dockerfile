@@ -120,6 +120,8 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     docker.io \
     exiftool \
+    lsb-release \
+    patchelf \
     && rm -rf /var/lib/apt/lists/*
 
 # Add user with default parameters
@@ -129,20 +131,17 @@ RUN groupadd -g ${GROUP_ID} somegroup && \
     useradd -m -u ${USER_ID} -g ${GROUP_ID} -s /bin/bash someuser
 
 # Install Orfeo Toolbox 9.1.0
-RUN wget https://www.orfeo-toolbox.org/packages/OTB-9.1.0-Linux.tar.gz \
-    && mkdir /opt/otb/ \
-    && tar -xzf OTB-9.1.0-Linux.tar.gz -C /opt/otb/ \
-    && rm OTB-9.1.0-Linux.tar.gz
+WORKDIR /tmp/otb-install
+COPY stitching/otbinstall.sh /tmp/otb-install/otbinstall.sh
+RUN chmod +x /tmp/otb-install/otbinstall.sh && /tmp/otb-install/otbinstall.sh --install
+
+RUN bash -lc 'source /opt/otb/otbenv.profile >/dev/null 2>&1 || true && test -f /opt/otb/tools/install_done.txt || true'
 
 # Set working directory for your project
 WORKDIR ${PROJECT_MOUNT_POINT}
 
 # Copy the entire project
 COPY . ${PROJECT_MOUNT_POINT}
-
-# Wrapper for OTB
-COPY stitching/otbrun.sh /usr/local/bin/otbrun.sh
-RUN chmod +x /usr/local/bin/otbrun.sh
 
 # For ODM
 ENV MPLCONFIGDIR=/tmp/matplotlib

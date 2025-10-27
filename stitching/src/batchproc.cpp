@@ -281,7 +281,7 @@ void BatchProcessor::mergeWithOTB(const fs::path& orthoPath) {
     TemporaryPath mosaicTempUnoptimizedFile(mosaicTempUnoptimizedPath);
     {
         std::stringstream mosaic_cmd;
-        mosaic_cmd << "otbrun.sh otbcli_Mosaic -il " // Use the wrapper so that OTB libraries are isolated
+        mosaic_cmd << "otbcli_Mosaic -il " // Use the wrapper so that OTB libraries are isolated
                    << "\"" << config_.stitchedFile << "\" "
                    << "\"" << newMosaicWarpedExpandedFile.get_path().string() << "\" "
                    << "-comp.feather slim "
