@@ -1,6 +1,9 @@
 #ifndef HELPERS_H
 #define HELPERS_H
 
+#include <ctime>
+#include <chrono>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <cstddef>
@@ -63,6 +66,13 @@ inline bool isJPG(const std::string &filepath) {
     auto ext = getExtension(filepath);
     for (auto& c : ext) c = std::tolower(c);
     return ext == ".jpg" || ext == ".jpeg";
+}
+
+inline std::string getTimestamp() {
+    auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::stringstream tss;
+    tss << std::put_time(std::localtime(&now), "%Y%m%d_%H%M%S");
+    return tss.str();
 }
 
 #endif

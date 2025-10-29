@@ -1,4 +1,9 @@
 #include "../include/batchproc.h"
+#include "helpers.h"
+
+#include <cstdio>
+#include <filesystem>
+#include <optional>
 #include <string>
 
 #ifndef _WIN32
@@ -34,7 +39,10 @@ void BatchProcessor::setProcessedStatusToImages(const fs::path& imagesDir) {
             std::string cmd = "exiftool -overwrite_original -" + config_.exifTagProcessed + "=\"Processed\" " + img.path().string() + " >/dev/null 2>&1 ";
             runCommand(cmd);
         } catch (const std::exception& e) {
-            std::cerr << RED << "[ERROR] Failed to tag image " << img << ": " << e.what() << RESET << std::endl;
+            fprintf(
+                stderr,
+                RED "[ERROR] Failed to tag image %s: %s \r\n" RESET, img.path().c_str(), e.what()
+            );
         }
     }
 }
@@ -42,11 +50,14 @@ void BatchProcessor::setProcessedStatusToImages(const fs::path& imagesDir) {
 void BatchProcessor::processBatchesLoop() {
     while (!stopSignal_.load()) {
         std::unique_lock<std::mutex> lock(queueMutex_);
-        queueCV_.wait(lock, [this] { return !batchQueue_.empty() || stopSignal_.load(); });
+
+        queueCV_.wait(lock, [this] { 
+            return !batchQueue_.empty() || stopSignal_.load(); 
+        });
 
         if (stopSignal_.load()) {
-            // no need to re-lock, we already own it here
-            while (!batchQueue_.empty()) batchQueue_.pop();
+            while (!batchQueue_.empty()) 
+                batchQueue_.pop();
             break;
         }
 
@@ -61,18 +72,19 @@ void BatchProcessor::processBatchesLoop() {
         fs::path batchPath = createBatchDirectory(task.images, task.batch_id);
         fs::path orthoPath = batchPath / "odm_orthophoto" / "odm_orthophoto.tif";
 
-        bool isBatchSuccessful = runOdmBatchSuccessful(batchPath, orthoPath);
-        if (isBatchSuccessful) {
-            mergeWithOTB(orthoPath);
-        } else {
-            std::cerr << RED << "[FATAL] Batch failed after " << config_.retries << " retries: " << batchPath << RESET << std::endl;
+        bool isBatchSuccessful = runBatchSuccessful(batchPath, orthoPath);
+        if (isBatchSuccessful) merge(orthoPath);
+        else {
+            fprintf(
+                stderr,
+                RED "[ERROR] Batch failed after %zu retries: %s \r\n" RESET, config_.retries, batchPath.c_str()
+            );
         }
 
         // cleanup
         for (const auto& entry : fs::directory_iterator(batchPath)) {
             if (entry.path().filename() == "images") {
-                // assign "processed" tag to images only after successful processing
-                if (isBatchSuccessful) {
+                if (isBatchSuccessful) { // assign "processed" tag to images only after successful processing
                     setProcessedStatusToImages(entry.path());
                 }
                 continue;
@@ -81,12 +93,15 @@ void BatchProcessor::processBatchesLoop() {
             try {
                 fs::remove_all(entry.path());
             } catch (const fs::filesystem_error& e) {
-                std::cerr << RED << "[WARNING] Failed to remove " << entry.path() << ": " << e.what() << RESET << std::endl;
+                fprintf(
+                    stderr,
+                    RED "[ERROR] Failed to remove %s: %s \r\n" RESET, entry.path().c_str(), e.what()
+                );
             }
         }
     }
 
-    std::cout << "[INFO] BatchProcessor loop stopped." << std::endl;
+    fprintf(stdout, "[INFO] BatchProcessor loop stopped. \r\n");
 }
 
 fs::path BatchProcessor::createBatchDirectory(const std::vector<fs::path>& images, int batch_id) {
@@ -101,7 +116,10 @@ fs::path BatchProcessor::createBatchDirectory(const std::vector<fs::path>& image
         try {
             fs::rename(img, batchImagesPath / img.filename());
         } catch (const fs::filesystem_error& e) {
-            std::cerr << RED << "[ERROR] Failed to move image " << img << " to batch " << batchImagesPath << ": " << e.what() << RESET << std::endl;
+            fprintf(
+                stderr,
+                RED "[ERROR] Failed to move image %s to batch %s: %s \r\n" RESET, img.c_str(), batchImagesPath.c_str(), e.what()
+            );
         }
     }
 
@@ -113,8 +131,7 @@ int BatchProcessor::runCommand(const std::string& cmd) {
 
     #ifndef _WIN32
         pid_t pid = fork();
-        if (pid == 0) {
-            // Child
+        if (pid == 0) { // Child
             execl("/bin/sh", "sh", "-c", cmd.c_str(), nullptr);
             _exit(127);
         }
@@ -122,13 +139,21 @@ int BatchProcessor::runCommand(const std::string& cmd) {
         int status = 0;
         while (true) {
             pid_t w = waitpid(pid, &status, WNOHANG);
+
             if (w == pid) break; // process finished
 
             if (stopSignal_.load()) {
-                std::cerr << "[INFO] Stopping command: " << cmd << std::endl;
-                kill(pid, SIGTERM);                 // try graceful stop first
+                fprintf(
+                    stdout,
+                    "[INFO] Stopping command: %s \r\n" RESET, cmd.c_str()
+                );
+
+                // try graceful stop first
+                kill(pid, SIGTERM);
                 std::this_thread::sleep_for(std::chrono::seconds(1));
-                kill(pid, SIGKILL);                 // force kill if still alive
+
+                // force kill if still alive
+                kill(pid, SIGKILL);
                 waitpid(pid, &status, 0);
                 return -1;
             }
@@ -142,7 +167,7 @@ int BatchProcessor::runCommand(const std::string& cmd) {
     #endif
 }
 
-bool BatchProcessor::runOdmBatchInternal(const fs::path& batchPath) {
+bool BatchProcessor::runBatch(const fs::path& batchPath) {
     #ifdef _WIN32 // probably will be removed
         std::string absoluteBatchPath = fs::absolute(batchPath).string();
 
@@ -167,216 +192,306 @@ bool BatchProcessor::runOdmBatchInternal(const fs::path& batchPath) {
                     "-w /datasets/project "
                     "opendronemap/odm "
                     "--project-path /datasets project "
-                    "--fast-orthophoto --skip-3dmodel";
+                    "--fast-orthophoto "
+                    "--skip-3dmodel ";
     #endif
     return runCommand(cmd) == 0;
 }
 
-void BatchProcessor::savePreviousOrthophoto(std::string &timestamp) {
-    fs::path previousMosaicPath = config_.stitchedDir + '/' + ("prev_mosaic_" + timestamp + ".tif");
+void BatchProcessor::initMosaic(const fs::path& orthoPath) {
     try {
-        fs::copy_file(config_.stitchedFile, previousMosaicPath, fs::copy_options::overwrite_existing);
-        std::cout << "[DEBUG] Previous mosaic saved to: " << previousMosaicPath << std::endl;
+        fs::create_directories(config_.stitchedDir);
+        fs::copy_file(
+            orthoPath, 
+            config_.stitchedFile, 
+            fs::copy_options::overwrite_existing
+        );
+        fprintf(stdout, "[INFO] Mosaic initialized with: %s \r\n", config_.stitchedFile.c_str());
     } catch (const fs::filesystem_error& e) {
-        std::cerr << RED << "[WARN] Failed to backup previous mosaic: " << e.what() << RESET << std::endl;
+        fprintf(
+            stderr,
+            RED "[ERROR] Failed to initialize mosaic: %s \r\n" RESET, e.what()
+        );
+        return;
     }
 }
 
-void BatchProcessor::mergeWithOTB(const fs::path& orthoPath) {
-    std::lock_guard<std::mutex> lock(mosaicMutex_);
+void BatchProcessor::savePreviousOrthophoto() {
+    std::string previousMosaicPath = config_.stitchedDir + '/' + ("prev_mosaic_" + getTimestamp() + ".tif");
+    try {
+        fs::copy_file(
+            config_.stitchedFile, 
+            previousMosaicPath, 
+            fs::copy_options::overwrite_existing
+        );
+        fprintf(stdout, "[INFO] Previous mosaic saved to: %s \r\n", previousMosaicPath.c_str());
+    } catch (const fs::filesystem_error& e) {
+        fprintf(
+            stderr,
+            RED "[ERROR] Failed to backup previous mosaic: %s \r\n" RESET, e.what()
+        );
+    }
+}
 
-    std::stringstream tss;
-    auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    tss << std::put_time(std::localtime(&now), "%Y%m%d_%H%M%S");
-    std::string timestamp = tss.str();
+std::optional<OrthoMosaic> BatchProcessor::fillOrthoMosaic(const fs::path& orthoPath) {
+    OrthoMosaic mosaic;
+    mosaic.orthoPath = orthoPath;
 
-    fs::create_directories(config_.stitchedDir);
-    
-    // Initialize mosaic
-    if (!fs::exists(config_.stitchedFile)) {
-        try {
-            fs::copy_file(orthoPath, config_.stitchedFile, fs::copy_options::overwrite_existing);
-            std::cout << "[INFO] Mosaic initialized with: " << config_.stitchedFile << "\n";
-            return;
-        } catch (const fs::filesystem_error& e) {
-            std::cerr << RED << "[ERROR] Failed to initialize mosaic: " << e.what() << RESET << std::endl;
-            return;
-        }
+    if (!getRasterInfo(
+        orthoPath.c_str(), 
+        mosaic.geoTransform, 
+        mosaic.mosaicProjWkt, 
+        mosaic.width, 
+        mosaic.height)) {
+        fprintf(
+            stderr,
+            RED "[ERROR] Could not get info for mosaic: %s \r\n" RESET, config_.stitchedFile.c_str()
+        );
+        return std::nullopt;
     }
 
-    if (config_.savePreviousOrthophoto) savePreviousOrthophoto(timestamp);
-
-    double mosaicGeoTransform[6];
-    int mosaicWidth, mosaicHeight;
-    std::optional<std::string> mosaicProjWkt;
-    if (!getRasterInfo(config_.stitchedFile, mosaicGeoTransform, mosaicProjWkt, mosaicWidth, mosaicHeight)) {
-        std::cerr << RED << "[ERROR] Could not get info for existing mosaic: " << config_.stitchedFile << RESET << std::endl;
-        return;
+    if (!mosaic.mosaicProjWkt.has_value() || mosaic.mosaicProjWkt->empty()) {
+        fprintf(
+            stderr,
+            RED "[ERROR] Mosaic has no projection, cannot proceed with gdalwarp for growth. \r\n" RESET
+        );
+        return std::nullopt;
     }
 
-    if (!mosaicProjWkt.has_value() || mosaicProjWkt->empty()) {
-        std::cerr << RED << "[ERROR] Mosaic has no projection, cannot proceed with gdalwarp for growth." << RESET << "\n";
-        return;
-    }
+    return mosaic;
+}
 
-    double newMosaicGeoTransform[6];
-    int newMosaicWidth, newMosaicHeight;
-    std::optional<std::string> newMosaicProjWkt;
-    if (!getRasterInfo(orthoPath, newMosaicGeoTransform, newMosaicProjWkt, newMosaicWidth, newMosaicHeight)) {
-        std::cerr << RED << "[ERROR] Could not get info for new orthophoto: " << orthoPath << RESET << std::endl;
-        return;
-    }
-
-    double unionMinX, unionMaxX, unionMinY, unionMaxY;
-    double avgResX, avgResY;
+UnionExtent BatchProcessor::getUnionExtent(OrthoMosaic& oldm, OrthoMosaic& newm) {
+    UnionExtent u;
     calculateUnionExtent(
-        mosaicGeoTransform, mosaicWidth, mosaicHeight,
-        newMosaicGeoTransform, newMosaicWidth, newMosaicHeight,
-        unionMinX, unionMaxX, unionMinY, unionMaxY,
-        avgResX, avgResY
+        oldm.geoTransform, oldm.width, oldm.height,
+        newm.geoTransform, newm.width, newm.height,
+        u.unionMinX, u.unionMaxX, 
+        u.unionMinY, u.unionMaxY,
+        u.avgResX, u.avgResY
     );
+    return u;
+}
 
-    // Write mosaic WKT
-    fs::path mosaicWktTempPath = config_.stitchedDir + '/' + ("mosaic_proj_" + timestamp + ".wkt");
+std::optional<TemporaryPath> BatchProcessor::writeMosaicWKT(const OrthoMosaic& old) {
+    const fs::path mosaicWktTempPath = config_.stitchedDir + '/' + "mosaic_proj.wkt";
     TemporaryPath mosaicWktTempFile(mosaicWktTempPath);
     {
-        std::ofstream wktfile(mosaicWktTempFile.get_path());
+        std::ofstream wktfile(mosaicWktTempPath);
         if (!wktfile.is_open()) {
-            std::cerr << RED << "[ERROR] Could not create temporary WKT file: " << mosaicWktTempFile.get_path() << RESET << std::endl;
-            return;
+            fprintf(
+                stderr,
+                RED "[ERROR] Could not create temporary WKT file: %s \r\n" RESET, mosaicWktTempPath.c_str()
+            );
+            return std::nullopt;
         }
-        wktfile << *mosaicProjWkt;
+        wktfile << *old.mosaicProjWkt;
         wktfile.close();
     }
+    return mosaicWktTempFile;
+}
 
-    // Warp new orthophoto to mosaic CRS & bounds
-    fs::path newMosaicWarpedExpandedPath = config_.stitchedDir + '/' + ("new_ortho_warped_expanded_" + timestamp + ".tif");
-    TemporaryPath newMosaicWarpedExpandedFile(newMosaicWarpedExpandedPath);
-    {
-        std::stringstream gdalwarp_cmd;
-        gdalwarp_cmd << "gdalwarp "
-                     << "-t_srs \"" << mosaicWktTempFile.get_path().string() << "\" "
-                     << "-te " << std::fixed << std::setprecision(10) << unionMinX << " "
-                     << std::fixed << std::setprecision(10) << unionMinY << " "
-                     << std::fixed << std::setprecision(10) << unionMaxX << " "
-                     << std::fixed << std::setprecision(10) << unionMaxY << " "
-                     << "-tr " << std::fixed << std::setprecision(10) << avgResX << " "
-                     << std::fixed << std::setprecision(10) << avgResY << " "
-                     << "-r bilinear "
-                     << "-dstalpha "
-                     << "-srcnodata 0 "
-                     << "-dstnodata 0 "
-                     << "\"" << orthoPath.string() << "\" "
-                     << "\"" << newMosaicWarpedExpandedFile.get_path().string() << "\" ";
+TemporaryPath BatchProcessor::initMosaicExpanded() {
+    const fs::path expandedPath = config_.stitchedDir + '/' + "new_ortho_warped_expanded.tif";
+    TemporaryPath expanded(expandedPath);
+    return expanded;
+}
 
-        if (runCommand(gdalwarp_cmd.str()) != 0) {
-            std::cerr << RED << "[ERROR] gdalwarp failed to align and expand new orthophoto. Cannot grow mosaic." << RESET << "\n";
-            return;
-        }
-        std::cout << "[INFO] New orthophoto warped and expanded to: " << newMosaicWarpedExpandedFile.get_path() << std::endl;
+TemporaryPath BatchProcessor::initMosaicRealigned() {
+    fs::path realignedPath = config_.stitchedDir + '/' + "tmp_mosaic_unoptimized.tif";
+    TemporaryPath realigned(realignedPath);
+    return realigned;
+}
+
+TemporaryPath BatchProcessor::initMosaicOptimized() {
+    fs::path optimizedPath = config_.stitchedDir + '/' + "tmp_mosaic_optimized.tif";
+    TemporaryPath optimized(optimizedPath);
+    return optimized;
+}
+
+void BatchProcessor::expandMosaic(TemporaryPath& tempWktFile, TemporaryPath& tempWarpedExpanded, const OrthoMosaic &oldm, const OrthoMosaic &newm, const UnionExtent& u) {
+    std::stringstream cmd;
+    cmd << "gdalwarp "
+        << "-t_srs \"" << tempWktFile.get_path().string() << "\" "
+        << "-te " << std::fixed << std::setprecision(10) << u.unionMinX << " "
+        << std::fixed << std::setprecision(10) << u.unionMinY << " "
+        << std::fixed << std::setprecision(10) << u.unionMaxX << " "
+        << std::fixed << std::setprecision(10) << u.unionMaxY << " "
+        << "-tr " << std::fixed << std::setprecision(10) << u.avgResX << " "
+        << std::fixed << std::setprecision(10) << u.avgResY << " "
+        << "-r bilinear "
+        << "-dstalpha "
+        << "-srcnodata 0 "
+        << "-dstnodata 0 "
+        << "\"" << newm.orthoPath.string() << "\" "
+        << "\"" << tempWarpedExpanded.get_path().string() << "\" ";
+
+    if (runCommand(cmd.str()) != 0) {
+        fprintf(
+            stderr,
+            RED "[ERROR] gdalwarp failed to align and expand new orthophoto. Cannot grow mosaic. \r\n" RESET
+        );
+        return;
     }
 
-    // Blend realigned image with mosaic
-    fs::path mosaicTempUnoptimizedPath = config_.stitchedDir + '/' + ("tmp_mosaic_unoptimized_" + timestamp + ".tif");
-    TemporaryPath mosaicTempUnoptimizedFile(mosaicTempUnoptimizedPath);
-    {
-        std::stringstream mosaic_cmd;
-        mosaic_cmd << "otbcli_Mosaic -il " // Use the wrapper so that OTB libraries are isolated
-                   << "\"" << config_.stitchedFile << "\" "
-                   << "\"" << newMosaicWarpedExpandedFile.get_path().string() << "\" "
-                   << "-comp.feather slim "
-                   << "-comp.feather.slim.length 10 "
-                   << "-comp.feather.slim.exponent 1.0 "
-                   << "-harmo.method band "
-                   << "-harmo.cost rmse "
-                   << "-interpolator bco "
-                   << "-interpolator.bco.radius 2 "
-                   << "-out \"" << mosaicTempUnoptimizedFile.get_path().string() << "\" uint8 ";
+    fprintf(stdout, "[INFO] New orthophoto warped and expanded to: %s \r\n" RESET, tempWarpedExpanded.get_path().c_str());
+}
 
-        std::cout << "[DEBUG] OTB Mosaic Command: " << mosaic_cmd.str() << std::endl;
-        if (runCommand(mosaic_cmd.str()) != 0) {
-            std::cerr << RED << "[ERROR] otbcli_Mosaic failed. Command: " << mosaic_cmd.str() << RESET << std::endl;
-            return;
-        }
-    }
+void BatchProcessor::mergeMosaic(TemporaryPath& expanded, TemporaryPath& realigned) {
+    std::stringstream cmd;
+    cmd << "otbcli_Mosaic -il "
+        << "\"" << config_.stitchedFile << "\" "
+        << "\"" << expanded.get_path().string() << "\" "
+        << "-comp.feather slim "
+        << "-comp.feather.slim.length 10 "
+        << "-comp.feather.slim.exponent 1.0 "
+        << "-harmo.method band "
+        << "-harmo.cost rmse "
+        << "-interpolator bco "
+        << "-interpolator.bco.radius 2 "
+        << "-out \"" << realigned.get_path().string() << "\" uint8 ";
 
-    // Optimize final mosaic
-    fs::path mosaicTempOptimizedPath = config_.stitchedDir + '/' + ("tmp_mosaic_optimized_" + timestamp + ".tif");
-    TemporaryPath mosaicTempOptimizedFile(mosaicTempOptimizedPath);
-    {
-        std::stringstream gdaltranslate_cmd;
-        gdaltranslate_cmd << "gdal_translate "
-                 << "\"" << mosaicTempUnoptimizedFile.get_path().string() << "\" "
-                 << "\"" << mosaicTempOptimizedFile.get_path().string() << "\" "
-                 << "-co \"TILED=YES\" ";
-
-        if (config_.compress) gdaltranslate_cmd << "-co \"COMPRESS=DEFLATE\" ";
-        if (config_.useBigTIFF) gdaltranslate_cmd << "-co \"BIGTIFF=YES\" ";
-
-        gdaltranslate_cmd << "-co \"BLOCKXSIZE=" << config_.blockSize << "\" "
-                 << "-co \"BLOCKYSIZE=" << config_.blockSize << "\" ";
-
-        if (runCommand(gdaltranslate_cmd.str()) != 0) {
-            std::cerr << RED << "[ERROR] gdal_translate failed to optimize output mosaic. Proceeding with unoptimized file." << RESET << "\n";
-            try { // If optimization fails, try to use the unoptimized file
-                fs::rename(mosaicTempUnoptimizedFile.release(), config_.stitchedFile);
-                std::cout << "[INFO] Successfully updated stitched orthomosaic (unoptimized) at: " << config_.stitchedFile << std::endl;
-            } catch (const fs::filesystem_error& e) {
-                std::cerr << RED << "[ERROR] Failed to replace stitched file with unoptimized version: " << e.what() << RESET << std::endl;
-            }
-            return;
-        }
-    }
-
-    try {
-        fs::rename(mosaicTempOptimizedFile.release(), config_.stitchedFile);
-        std::cout << GREEN << "[INFO] Successfully updated stitched orthomosaic at: " << config_.stitchedFile << RESET << std::endl;
-    } catch (const fs::filesystem_error& e) {
-        std::cerr << RED <<"[ERROR] Failed to replace stitched file: " << e.what() << RESET << std::endl;
+    if (runCommand(cmd.str()) != 0) {
+        fprintf(
+            stderr,
+            RED "[ERROR] otbcli_Mosaic failed. Command: %s \r\n" RESET, cmd.str().c_str()
+        );
         return;
     }
 }
 
-bool BatchProcessor::runOdmBatchSuccessful(const fs::path& batchPath, const fs::path& orthoPath) {
-    std::size_t retryCount = 0;
-    std::size_t effectiveRetries = config_.retry ? config_.retries : 1;
+void BatchProcessor::optimizeMosaic(TemporaryPath& unoptimized, TemporaryPath& optimized) {
+    std::stringstream cmd;
+    cmd << "gdal_translate "
+        << "\"" << unoptimized.get_path().string() << "\" "
+        << "\"" << optimized.get_path().string() << "\" "
+        << "-co \"TILED=YES\" ";
+
+    if (config_.compress) cmd << "-co \"COMPRESS=DEFLATE\" ";
+    if (config_.useBigTIFF) cmd << "-co \"BIGTIFF=YES\" ";
+
+    cmd << "-co \"BLOCKXSIZE=" << config_.blockSize << "\" "
+        << "-co \"BLOCKYSIZE=" << config_.blockSize << "\" ";
+
+    if (runCommand(cmd.str()) != 0) { // If optimization fails, try to use the unoptimized file
+        fprintf(
+            stderr,
+            RED "[ERROR] gdal_translate failed to optimize output mosaic. Proceeding with unoptimized file. \r\n" RESET
+        );
+        try {
+            fs::rename(unoptimized.release(), config_.stitchedFile);
+            fprintf(
+                stdout,
+                "[INFO] Successfully updated stitched orthomosaic (unoptimized) at: %s \r\n", config_.stitchedFile.c_str()
+            );
+        } catch (const fs::filesystem_error& e) {
+            fprintf(
+                stderr,
+                RED "[ERROR] Failed to replace stitched file with unoptimized version: %s \r\n" RESET, e.what()
+            );
+        }
+        return;
+    }
+
+    try {
+        fs::rename(optimized.release(), config_.stitchedFile);
+        fprintf(
+            stdout,
+            GREEN "[INFO] Successfully updated stitched orthomosaic at: %s \r\n" RESET, config_.stitchedFile.c_str()
+        );
+    } catch (const fs::filesystem_error& e) {
+        fprintf(
+            stderr,
+            RED "[ERROR] Failed to replace stitched file: %s \r\n" RESET, e.what()
+        );
+        return;
+    }
+}
+
+void BatchProcessor::merge(const fs::path& newOrthoPath) {
+    std::lock_guard<std::mutex> lock(mosaicMutex_);
+
+    // Initialize mosaic
+    if (!fs::exists(config_.stitchedFile)) {
+        initMosaic(newOrthoPath);
+        return;
+    }
+
+    if (config_.savePreviousOrthophoto) savePreviousOrthophoto();
+
+    std::optional<OrthoMosaic> stitched = fillOrthoMosaic(config_.stitchedFile);
+    std::optional<OrthoMosaic> newOrtho = fillOrthoMosaic(newOrthoPath);
+
+    // Calculate union extent
+    UnionExtent u = getUnionExtent(stitched.value(), newOrtho.value());
+
+    // Expand mosaic using gdalwarp
+    std::optional<TemporaryPath> tempWKT = writeMosaicWKT(stitched.value());       // Write mosaic WKT
+    TemporaryPath expanded = initMosaicExpanded();                                     // Warp new orthophoto to mosaic CRS & bounds
+    expandMosaic(tempWKT.value(), expanded, stitched.value(), newOrtho.value(), u);
+
+    // Blend realigned image with mosaic
+    TemporaryPath realigned = initMosaicRealigned();
+    mergeMosaic(expanded, realigned);
+
+    // Optimize final mosaic
+    TemporaryPath optimized = initMosaicOptimized();
+    optimizeMosaic(realigned, optimized);
+}
+
+bool BatchProcessor::runBatchSuccessful(const fs::path& batchPath, const fs::path& orthoPath) {
+    int retryCount = 0;
+    int effectiveRetries = config_.retry ? config_.retries : 1;
 
     while (retryCount <= effectiveRetries && !stopSignal_) {
-        std::cout << "[INFO] Processing batch (attempt #" << retryCount + 1 << " of " << effectiveRetries + 1 << "): " << batchPath << std::endl;
+        fprintf(stdout, "[INFO] Processing batch (attempt #%d of %d): %s \r\n", retryCount+1, effectiveRetries+1, batchPath.c_str());
 
         if (stopSignal_.load()) break;
 
         OdmRunResult result = OdmRunResult::CommandFailed;
 
-        if (runOdmBatchInternal(batchPath)) {
+        if (runBatch(batchPath)) {
+            const char* ortho = orthoPath.c_str();
             if (!fs::exists(orthoPath)) {
                 result = OdmRunResult::OrthophotoNotFound;
-                std::cerr << RED << "[ERROR] Orthophoto not found after ODM run: " << orthoPath << RESET << std::endl;
+                fprintf(
+                    stderr,
+                    RED "[ERROR] Orthophoto not found after ODM run: %s \r\n" RESET, ortho
+                );
             } else {
                 try {
                     auto fsize = fs::file_size(orthoPath);
                     if (fsize == 0) {
                         result = OdmRunResult::OrthophotoZeroBytes;
-                        std::cerr << RED << "[ERROR] Orthophoto is 0 bytes: " << orthoPath << RESET << std::endl;
+                        fprintf(
+                            stderr,
+                            RED "[ERROR] Orthophoto is 0 bytes: %s \r\n" RESET, ortho
+                        );
                     } else {
-                        if (!validateGeotiff(orthoPath)) {
+                        if (!validateGeotiff(ortho)) {
                             result = OdmRunResult::ValidationFailed;
-                            std::cerr << RED << "[ERROR] Orthophoto failed GDAL validation: " << orthoPath << RESET << std::endl;
+                            fprintf(
+                                stderr,
+                                RED "[ERROR] Orthophoto failed GDAL validation: %s \r\n" RESET, ortho
+                            );
                         } else {
                             result = OdmRunResult::Success;
                         }
                     }
                 } catch (const fs::filesystem_error& e) {
                     result = OdmRunResult::OrthophotoNotFound;
-                    std::cerr << RED << "[ERROR] Failed to get file size for " << orthoPath << ": " << e.what() << RESET << std::endl;
+                    fprintf(
+                        stderr,
+                        RED "[ERROR] Failed to get file size for %s: %s \r\n" RESET, ortho, e.what()
+                    );
                 }
             }
         } else {
-            // ODM command failed already handled by runOdmBatchInternal return
+            // ODM command failed already handled by runBatch return
         }
 
         if (result == OdmRunResult::Success) {
-            std::cout << GREEN << "[INFO] Orthophoto passed validation: " << orthoPath << RESET << std::endl;
+            fprintf(stdout, GREEN "[INFO] Orthophoto passed validation: %s \r\n" RESET, orthoPath.c_str());
             return true;
         } else {
             std::string err;
@@ -406,19 +521,26 @@ bool BatchProcessor::runOdmBatchSuccessful(const fs::path& batchPath, const fs::
                         try {
                             fs::remove_all(entry.path());
                         } catch (const fs::filesystem_error& e) {
-                            std::cerr << RED << "[ERROR] Failed to remove " << entry.path() << ": " << e.what() << RESET << std::endl;
+                            fprintf(
+                                stderr,
+                                RED "[ERROR] Failed to remove %s: %s \r\n" RESET, entry.path().c_str(), e.what()
+                            );
                         }
                     }
-                    std::cout << "[DEBUG] Cleaned ODM output for retry: " << (batchPath) << std::endl;
                 }
             } catch (const fs::filesystem_error& e) {
-                std::cerr << RED << "[ERROR] Failed to clean ODM output for retry: " << e.what() << RESET << std::endl;
+                fprintf(
+                    stderr,
+                    RED "[ERROR] Failed to clean ODM output for retry: %s \r\n" RESET, e.what()
+                );
             }
 
             ++retryCount;
+
             if (stopSignal_) return false;
+
             if (retryCount < effectiveRetries) {
-                 std::this_thread::sleep_for(std::chrono::seconds(config_.retryTimeoutSec));
+                std::this_thread::sleep_for(std::chrono::seconds(config_.retryTimeoutSec));
             }
         }
     }

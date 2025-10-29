@@ -24,6 +24,23 @@ enum class OdmRunResult {
     ValidationFailed
 };
 
+struct OrthoMosaic {
+    fs::path orthoPath;
+    double geoTransform[6];
+    int width;
+    int height;
+    std::optional<std::string> mosaicProjWkt;
+};
+
+struct UnionExtent {
+    double unionMinX;
+    double unionMaxX;
+    double unionMinY;
+    double unionMaxY;
+    double avgResX;
+    double avgResY;
+};
+
 struct BatchTask {
     std::vector<fs::path> images;
     int batch_id;
@@ -41,29 +58,50 @@ public:
 
 private:
     const Config& config_;
+
     std::queue<BatchTask>& batchQueue_;
     std::mutex& queueMutex_;
     std::condition_variable& queueCV_;
     std::atomic<bool>& stopSignal_;
+    std::mutex mosaicMutex_;
 
     // batchproc.cpp
-    fs::path createBatchDirectory(const std::vector<fs::path>& images, int batch_id);
     int runCommand(const std::string& cmd);
-    bool runOdmBatchInternal(const fs::path& batchPath);
-    void mergeWithOTB(const fs::path& orthoPath);
-    bool runOdmBatchSuccessful(const fs::path& batchPath, const fs::path& orthoPath);
-    void savePreviousOrthophoto(std::string &timestamp);
+
+    fs::path createBatchDirectory(const std::vector<fs::path>& images, int batch_id);
+
+    void savePreviousOrthophoto();
     void setProcessedStatusToImages(const fs::path& imagesDir);
+    
+    bool runBatch(const fs::path& batchPath);
+    bool runBatchSuccessful(const fs::path& batchPath, const fs::path& orthoPath);
+
+    std::optional<OrthoMosaic> fillOrthoMosaic(const fs::path& orthoPath);
+
+    UnionExtent getUnionExtent(OrthoMosaic& oldm, OrthoMosaic& newm);
+
+    std::optional<TemporaryPath> writeMosaicWKT(const OrthoMosaic& old);
+    TemporaryPath initMosaicExpanded();
+    TemporaryPath initMosaicRealigned();
+    TemporaryPath initMosaicOptimized();
+
+    // Mosaic processing
+    void initMosaic(const fs::path& orthoPath);
+    void expandMosaic(TemporaryPath& tempWktFile, TemporaryPath& tempWarpedExpanded, const OrthoMosaic &oldm, const OrthoMosaic &newm, const UnionExtent& u);
+    void mergeMosaic(TemporaryPath& expanded, TemporaryPath& realigned);
+    void optimizeMosaic(TemporaryPath& unoptimized, TemporaryPath& optimized);
+    void merge(const fs::path& newOrthoPath);
 
     // tiffproc.cpp
-    bool validateGeotiff(const fs::path& path);
-    bool getRasterInfo(const fs::path& path, double geoTransform[6], std::optional<std::string>& projWkt, int& width, int& height);
+    bool validateGeotiff(const char* path);
+    bool getRasterInfo(const char* path, double geoTransform[6], std::optional<std::string>& projWkt, int& width, int& height);
     void calculateUnionExtent(double geoTransform1[6], int width1, int height1,
                               double geoTransform2[6], int width2, int height2,
-                              double& unionMinX, double& unionMaxX, double& unionMinY, double& unionMaxY,
+                              double& unionMinX, double& unionMaxX, 
+                              double& unionMinY, double& unionMaxY,
                               double& avgResX, double& avgResY);
 
-    std::mutex mosaicMutex_;
+    
 };
 
 #endif
