@@ -8,35 +8,21 @@
 #include <string>
 #include <cstddef>
 #include <variant>
+#include <filesystem>
 
-inline std::string constructPathWithPrefix(const std::string &originalPath, const std::string &prefix) {
-    size_t extensionStart = originalPath.find_last_of('.');
-    std::string imageName = originalPath.substr(0, extensionStart);
-    std::string imageExtension = originalPath.substr(extensionStart, originalPath.size());
-    return imageName + prefix + imageExtension;
+namespace fs = std::filesystem;
+
+inline fs::path constructPathWithPrefix(const fs::path& originalPath, const std::string& prefix) {
+    fs::path parent = originalPath.parent_path();
+    std::string stem = originalPath.stem().string();      // "image"
+    std::string ext  = originalPath.extension().string(); // ".jpg"
+
+    return parent / (stem + prefix + ext);
 }
 
-inline std::string constructPathWithNewDir(const std::string &originalPath, const std::string &newDirPath) {
-    size_t filenameStart = originalPath.find_last_of('/');
-
-    #ifdef _WIN32
-        filenameStart = originalPath.find_last_of('\\');
-    #endif
-
-    std::string filename = "";
-    if (filenameStart != std::variant_npos) {
-        filename = originalPath.substr(filenameStart, originalPath.size());
-    } else {
-        #ifdef _WIN32
-            if (newDirPath.find_last_of('\\') != std::variant_npos) filename = originalPath;
-            else filename = "\\" + originalPath;
-        #else
-            if (newDirPath.find_last_of('/') != std::variant_npos) filename = originalPath;
-            else filename = "/" + originalPath;
-        #endif
-    }
-    
-    return newDirPath + filename;
+inline fs::path constructPathWithNewDir(const fs::path& originalPath, const fs::path& newDirPath) {
+    if (!fs::exists(newDirPath)) fs::create_directories(newDirPath);
+    return newDirPath / originalPath.filename();
 }
 
 inline std::string trim(const std::string &s) {
@@ -74,5 +60,22 @@ inline std::string getTimestamp() {
     tss << std::put_time(std::localtime(&now), "%Y%m%d_%H%M%S");
     return tss.str();
 }
+
+class Timer {
+public:
+    Timer(const std::string& name): name_(name), start_(std::chrono::high_resolution_clock::now()) {}
+
+    ~Timer() {
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> elapsed = end - start_;
+        std::cout << name_ << " took " << elapsed.count() << " ms\n";
+    }
+
+private:
+    std::string name_;
+    std::chrono::high_resolution_clock::time_point start_;
+};
+
+#define MEASURE_FUNCTION() Timer timer(__FUNCTION__);
 
 #endif

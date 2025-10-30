@@ -1,6 +1,7 @@
 #include "../include/fwatcher.h"
 #include "helpers.h"
 #include <algorithm>
+#include <cstdio>
 #include <thread>
 
 FolderWatcher::FolderWatcher(const Config& config, std::queue<BatchTask>& batchQueue, std::mutex& queueMutex, std::condition_variable& queueCV, std::atomic<bool>& stopSignal)
@@ -69,5 +70,6 @@ void FolderWatcher::watchFolderLoop() {
 
         std::this_thread::sleep_for(std::chrono::seconds(2));
     }
-    std::cout << "[INFO] FolderWatcher loop stopped." << std::endl;
+
+    std::fputs("[INFO] FolderWatcher loop stopped.\r\n", stdout);
 }

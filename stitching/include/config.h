@@ -12,7 +12,7 @@ struct Config {
     std::string stitchedFileName = "final_orthophoto.tif";
     std::string stitchedFile = stitchedDir + '/' + stitchedFileName;
     std::size_t blockSize = 256;
-    std::size_t batchSize = 10; // optimal, batches of less size result in bad quality images
+    std::size_t batchSize = 10; // minimal, batches of less size result in bad quality images
     std::size_t retries = 3;
     int batchTimeoutSec = 5;
     int retryTimeoutSec = 3;

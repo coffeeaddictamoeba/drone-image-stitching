@@ -37,8 +37,6 @@ private:
     std::unordered_set<fs::path> seenFiles_;
     std::vector<fs::path> imageBuffer_;
     std::optional<std::chrono::steady_clock::time_point> bufferStartTime_;
-
-    inline bool isJpg(const fs::path& p);
 };
 
 #endif
