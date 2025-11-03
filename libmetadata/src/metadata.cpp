@@ -1,6 +1,9 @@
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <sstream>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <algorithm>
 #include <cstdio>
@@ -53,8 +56,12 @@ std::unordered_map<std::string, std::string> strtomap(const std::string &out) {
 }
 
 std::unordered_map<std::string, std::string> extractImageMetadata(const std::string& imagePath) {
+    MEASURE_FUNCTION();
     if (!EXIFTOOL_IS_AVAILABLE) {
-        std::cerr << RED << "ExifTool not found in PATH." << RESET << "\n";
+        fputs(
+            RED "ExifTool not found in PATH." RESET,
+            stderr
+        );
         return {};
     }
 
@@ -64,6 +71,7 @@ std::unordered_map<std::string, std::string> extractImageMetadata(const std::str
 }
 
 std::string extractExifTagValue(const std::string& imagePath, const std::string& tagName) {
+    MEASURE_FUNCTION();
     if (!EXIFTOOL_IS_AVAILABLE) {
         throw std::runtime_error("ExifTool not found in PATH or not executable.");
     }
@@ -80,31 +88,44 @@ std::string extractExifTagValue(const std::string& imagePath, const std::string&
     return std::string{};
 }
 
-// assigns metadata to an image from other image's metadata
 void copyMetadata(const std::string& sourceImagePath, const std::string& destImagePath) {
-        if (!EXIFTOOL_IS_AVAILABLE) {
-            std::cerr << RED << "ExifTool not found." << RESET << "\n";
-            return;
-        }
-    
-        std::ostringstream ss;
-        ss << "-overwrite_original -tagsFromFile \"" << sourceImagePath << "\"";
-        for (const auto &tag : EXIFTOOL_TAGS) {
-            ss << " -" << tag;
-        }
-        ss << " \"" << destImagePath << "\"";
-    
-        std::string out = exif.run(ss.str());
-    
-    #ifdef DEBUG
-        std::cout << "[DEBUG] copyMetadata output:\n" << out << std::endl;
-    #endif
+    MEASURE_FUNCTION();
+    if (!EXIFTOOL_IS_AVAILABLE) {
+        fputs(
+            RED "ExifTool not found. \n" RESET,
+            stderr
+        );
+        return;
+    }
+
+    std::string cmd;
+    cmd.reserve(
+        (sizeof("-overwrite_original -tagsFromFile \"\" \"\"") - 1) +
+        sourceImagePath.size() + destImagePath.size() +
+        EXIFTOOL_TAGS_ARGS.size()
+    );
+
+    cmd.append("-overwrite_original -tagsFromFile \"");
+    cmd.append(sourceImagePath);
+    cmd.push_back('"');
+
+    cmd.append(EXIFTOOL_TAGS_ARGS);
+
+    cmd.append(" \"");
+    cmd.append(destImagePath);
+    cmd.push_back('"');
+
+    std::string out = exif.run(cmd);
 }
 
 // assigns metadata to an image from list of tags
 void assignMetadata(const std::string& imagePath, const std::unordered_map<std::string, std::string>& tags) {
+    MEASURE_FUNCTION();
     if (!EXIFTOOL_IS_AVAILABLE) {
-        std::cerr << RED << "ExifTool not found." << RESET << "\n";
+        fputs(
+            RED "ExifTool not found in PATH." RESET,
+            stderr
+        );
         return;
     }
 
@@ -123,10 +144,6 @@ void assignMetadata(const std::string& imagePath, const std::unordered_map<std::
     ss << " \"" << imagePath << "\"";
 
     std::string out = exif.run(ss.str());
-
-    #ifdef DEBUG
-        std::cout << "[DEBUG] assignMetadata output:\n" << out << std::endl;
-    #endif
 }
 
 float parseExifExposureTime(const std::string &exposure_str) {
@@ -190,7 +207,11 @@ void getSpeedXYZ(const std::unordered_map<std::string, std::string>& metadata, f
         speedX = gpsSpeed; 
         speedY = 0.0f; 
         speedZ = 0.0f;
-        std::cout << YELLOW << "[Warn] Using GPS speed fallback: " << speedX << " m/s" << RESET << std::endl;
+
+        fprintf(
+            stdout,
+            YELLOW "[WARN] Using GPS speed fallback: %.02f m/s \r\n" RESET, speedX
+        );
     }
 }
 
@@ -204,11 +225,10 @@ float findGSD(float altitude, float focalLength, int imageWidth, int imageHeight
     float gsd = std::max(gsdWidth, gsdHeight); // mm/px
 
     #ifdef DEBUG
-        std::cout << "[Info] GSD: Calculated GSD = " << gsd << " mm/px\n";
-        std::cout << "  Focal Length: " << focalLength << " mm\n";
-        std::cout << "  Sensor Size: " << sensorWidth << "x" << sensorHeight << " mm\n";
-        std::cout << "  Image Resolution: " << imageWidth << "x" << imageHeight << " px\n";
-        std::cout << "  Altitude: " << altitude << " mm\n";
+        fprintf(
+            stdout, 
+            "[INFO] Calculated GSD = %.02f mm/px \r\n", gsd
+        );
     #endif
 
     return gsd;
@@ -223,33 +243,35 @@ float findGSD(const std::unordered_map<std::string, std::string>& metadata, floa
         !parseFloatFromMetadata(metadata, "Focal Length", flen) ||
         !parseIntFromMetadata(metadata, "Image Width", width) ||
         !parseIntFromMetadata(metadata, "Image Height", height)) {
-        std::cerr << RED << "[Error] Missing essential metadata for GSD computation." << RESET << std::endl;
-        return 1.0f; // fallback (1 mm/px)
+            fputs(
+                RED "[ERROR] Missing essential metadata for GSD computation." RESET,
+                stderr
+            );
+            return 1.0f; // fallback (1 mm/px)
     }
 
     return findGSD(alt, flen, width, height, sensorWidth, sensorHeight);
-}
-
-// Finds GPS Image Direction (in case of Overall Speed) in radians
-float getGPSImgDirectionRad(const std::unordered_map<std::string, std::string> &metadata) {
-    float gpsImgDirection = 0.0f;
-    if (!parseFloatFromMetadata(metadata, "GPS Img Direction", gpsImgDirection)) {
-        std::cerr << RED << "[Error] Missing essential metadata for GSD computation." << RESET << std::endl;
-    }
-    return gpsImgDirection * static_cast<float>(M_PI) / 180.0f;
 }
 
 // Finds GPS Image Direction (in case of Overall Speed)
 float getGPSImgDirection(const std::unordered_map<std::string, std::string> &metadata) {
     float gpsImgDirection = 0.0f;
     if (!parseFloatFromMetadata(metadata, "GPS Img Direction", gpsImgDirection)) {
-        std::cerr << RED << "[Error] Missing essential metadata for GSD computation." << RESET << std::endl;
+        fputs(
+            RED "[Error] Missing essential metadata for GSD computation." RESET,
+            stderr
+        );
     }
     return gpsImgDirection;
 }
 
+// Finds GPS Image Direction (in case of Overall Speed) in radians
+float getGPSImgDirectionRad(const std::unordered_map<std::string, std::string> &metadata) {
+    return getGPSImgDirection(metadata) * static_cast<float>(M_PI) / 180.0f;
+}
+
 void listMetadata() {
-    std::cerr << RED << "[Error] Image requires essential metadata listed below:\n"
+    std::cerr << RED << "[ERROR] Image requires essential metadata listed below:\n"
                 << "    - Flight Yaw Degree\n"
                 << "    - Flight Pitch Degree\n"
                 << "    - Flight Roll Degree\n"
@@ -262,5 +284,5 @@ void listMetadata() {
                 << " If you are using 3D speed parameters, check:\n"
                 << "    - Flight X Speed\n" 
                 << "    - Flight Y Speed\n" 
-                << "    - Flight Z Speed" << RESET << std::endl;
+                << "    - Flight Z Speed" << RESET << "\n";
 }

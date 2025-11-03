@@ -161,4 +161,29 @@ inline bool parseIntFromMetadata(const std::unordered_map<std::string,std::strin
 float parseExifExposureTime(const std::string &exposure_str);
 float parseExifGPSSpeed(const std::string &gpsspeed_str, const std::string &gpsspeedref_str);
 
+inline constexpr std::size_t TAGS_ARGS_LEN = []() consteval {
+    std::size_t sum = 0;
+    for (auto tag : EXIFTOOL_TAGS) sum += 2 + tag.size(); // " -" + tag
+    return sum;
+}();
+
+template <std::size_t M>
+consteval auto tagsToArgs() {
+    std::array<char, M + 1> out{}; // +1 for '\0'
+    std::size_t pos = 0;
+    for (auto tag : EXIFTOOL_TAGS) {
+        out[pos++] = ' ';
+        out[pos++] = '-';
+        for (char c : tag) out[pos++] = c;
+    }
+    out[pos] = '\0';
+    return out;
+}
+
+inline constexpr auto TAG_ARGS_BUF = tagsToArgs<TAGS_ARGS_LEN>();
+inline constexpr std::string_view EXIFTOOL_TAGS_ARGS(
+    TAG_ARGS_BUF.data(),
+    TAG_ARGS_BUF.size() - 1 // drop '\0'
+);
+
 #endif

@@ -182,7 +182,6 @@ void Deblurrer::generateTest(const fs::path& testOutputPath) {
 
 // Checks if image is blurred (by image matrix)
 bool Deblurrer::isBlurred(const cv::Mat &image, float blurThreshold = 100.0f, int maxImageSize = 1024) {
-    MEASURE_FUNCTION();
     cv::Mat resized;
     if (image.cols > maxImageSize || image.rows > maxImageSize) {
         float scale = maxImageSize / float(std::max(image.cols, image.rows));
@@ -282,7 +281,7 @@ float Deblurrer::findBlurLength(const fs::path &imagePath, float &blurAngleRad) 
     
         fprintf(
             stdout, 
-            "[INFO] Current blur length estimated: %f mm (%d px) \r\n", blur, blurLength
+            "[INFO] Current blur length estimated: %.02f mm (%d px) \r\n", blur, blurLength
         );
     
         return std::max(1, blurLength); // px
@@ -293,7 +292,6 @@ float Deblurrer::findBlurLength(const fs::path &imagePath, float &blurAngleRad) 
 }
 
 void Deblurrer::findVBodies(const std::unordered_map<std::string, std::string> &metadata, float &Vx, float &Vy, float &Vz, float &speed) {
-    MEASURE_FUNCTION();
     float speedX, speedY, speedZ, yawRad, pitchRad, rollRad, exposure, gpsImgDirection;
 
     getPitchRollYawRad(metadata, pitchRad, rollRad, yawRad);
@@ -330,7 +328,6 @@ void Deblurrer::findVBodies(const std::unordered_map<std::string, std::string> &
 
 // Estimate point spread function (PSF)
 void Deblurrer::estimatePSF(int blurLengthPx, float blurAngleRad, cv::Mat& psf) {
-    MEASURE_FUNCTION();
     blurLengthPx = std::max(1, blurLengthPx);
     int ksize = std::max(blurLengthPx * 2 + 1, 15) | 1;  // Ensure odd
 
@@ -388,7 +385,6 @@ cv::Mat createHannWindow2D(int rows, int cols) {
 }
 
 void Deblurrer::fftshift(cv::Mat& input) {
-    MEASURE_FUNCTION();
     input = input(cv::Rect(0, 0, input.cols & -2, input.rows & -2));  // make even size
     int cx = input.cols / 2;
     int cy = input.rows / 2;
@@ -446,7 +442,7 @@ std::pair<cv::Mat, cv::Mat> Deblurrer::psfConjMag(const cv::Mat& psfDFT) {
 cv::Mat Deblurrer::padInput(const cv::Mat& input, const cv::Mat& psf) {
     MEASURE_FUNCTION();
     cv::Mat inputF;
-    input.convertTo(inputF, CV_32F, 1.0 / 255.0);
+    input.convertTo(inputF, CV_32FC3, 1.0 / 255.0);
 
     int padY = psf.rows;
     int padX = psf.cols;
