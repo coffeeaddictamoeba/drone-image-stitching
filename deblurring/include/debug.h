@@ -56,7 +56,7 @@ inline void diffBlurredDeblurred(cv::Mat &blurred, cv::Mat &deblurred, const std
         deblurred.convertTo(deblurred, blurred.type());
     }
 
-    cv::Mat diff = cv::abs(output - blurred);
+    cv::Mat diff = cv::abs(deblurred - blurred);
     visualizeMatrix(diff, outputImagePath);
 }
 
