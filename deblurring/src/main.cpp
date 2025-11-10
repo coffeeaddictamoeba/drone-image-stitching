@@ -39,8 +39,6 @@ void parseArgs(int argc, char* argv[]) {
             config.denoise = true;
         else if (arg == "--force") 
             config.forceDeblurring = true;
-        else if (arg == "--fast") // experimental
-            config.fast = true;
         else if (arg == "--snr" && i + 1 < argc)
             config.snr = std::stof(argv[++i]);
         else if (arg == "--blur-threshold" && i + 1 < argc)

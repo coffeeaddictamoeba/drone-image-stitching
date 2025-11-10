@@ -498,12 +498,7 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
         mask = cv::Mat(input.size(), CV_32F, 1.0f);
     }
 
-    std::array<cv::Mat, 3> outputChannels{};
-    if (config_.fast) {
-        outputChannels = fastdeconv(inputChannels, psfConj, wienerDenom, hann, mask, input, psf); // less rgb channel alignment
-    } else {
-        outputChannels = deconvolve(inputChannels, psfConj, wienerDenom, hann, mask, input, psf);
-    }
+    std::array<cv::Mat, 3> outputChannels = deconvolve(inputChannels, psfConj, wienerDenom, hann, mask, input, psf);
 
     if (outputChannels.size() == 1)
         output = outputChannels[0];
@@ -652,85 +647,6 @@ std::array<cv::Mat, 3> Deblurrer::deconvolve(const std::array<cv::Mat, 3>& input
     });
 
     return outputChannels;
-}
-
-// fix the bug with R channel
-std::array<cv::Mat, 3> Deblurrer::fastdeconv(const std::array<cv::Mat, 3>& inputChannels, const cv::Mat& psfConj, const cv::Mat& wienerDenom, const cv::Mat& hann, const cv::Mat& mask, const cv::Mat& originalInput, const cv::Mat& psf) {
-    MEASURE_FUNCTION();
-    std::array<cv::Mat, 3> out{};
-
-    CV_Assert(inputChannels[0].type() == CV_32F && inputChannels[1].type() == CV_32F && inputChannels[2].type() == CV_32F);
-    CV_Assert(psfConj.type() == CV_32FC2 && wienerDenom.type() == CV_32F && hann.type() == CV_32F);
-
-    CV_Assert(inputChannels[0].size() == hann.size() && hann.size() == wienerDenom.size() && wienerDenom.size() == psfConj.size());
-    CV_Assert(mask.type() == CV_32F && mask.size() == originalInput.size());
-
-    const int padY = psf.rows, padX = psf.cols;
-    const cv::Rect crop(padX, padY, originalInput.cols, originalInput.rows);
-
-    CV_Assert(crop.x>=0 && crop.y>=0 && crop.x+crop.width  <= inputChannels[0].cols && crop.y+crop.height <= inputChannels[0].rows);
-
-    // build luminance Y from padded RGB (ITU-R BT.601 coefficients; inputs are linear 0..1)
-    cv::Mat Y; Y.create(hann.size(), CV_32F);
-
-    // Y = 0.299 R + 0.587 G + 0.114 B
-    cv::addWeighted(inputChannels[0], 0.299f, inputChannels[1], 0.587f, 0.0, Y);
-    cv::add(Y, inputChannels[2] * 0.114f, Y);
-
-    // invHann = 1 / (hann + eps)
-    cv::Mat invHann; {
-        static constexpr float epsH = 1e-4f;
-        cv::Mat denom; cv::add(hann, epsH, denom, cv::noArray(), CV_32F);
-        cv::divide(1.0f, denom, invHann, 1.0, CV_32F);
-    }
-    // invDenom (2-channel) for complex scaling
-    cv::Mat invDenom2; {
-        static constexpr float epsD = 1e-3f;
-        cv::Mat invDenom; cv::divide(1.0f, wienerDenom, invDenom, 1.0, CV_32F);
-        invDenom.setTo(0, ~(wienerDenom > epsD));
-        cv::Mat chs[2] = { invDenom, invDenom };
-        cv::merge(chs, 2, invDenom2); // CV_32FC2
-    }
-    // 1 - mask
-    cv::Mat invMask; cv::subtract(1.0f, mask, invMask, cv::noArray(), CV_32F);
-
-    // deconvolve only Y
-    cv::Mat Ywin;  cv::multiply(Y, hann, Ywin, 1.0, CV_32F);
-
-    cv::Mat YF;    cv::dft(Ywin, YF, cv::DFT_COMPLEX_OUTPUT);             // CV_32FC2
-    cv::Mat Filt;  cv::mulSpectrums(YF, psfConj, Filt, 0, false);         // CV_32FC2
-    cv::multiply(Filt, invDenom2, Filt, 1.0, CV_32FC2);                   // divide via prebuilt inv denom
-    cv::Mat Yrest; cv::idft(Filt, Yrest, cv::DFT_REAL_OUTPUT | cv::DFT_SCALE); // CV_32F
-    cv::multiply(Yrest, invHann, Yrest, 1.0, CV_32F);
-
-    // crop Y and compute gain map on the output ROI
-    cv::Mat YrestCrop = Yrest(crop);
-    cv::Mat YorigCrop = Y(crop);
-
-    // blend luminance like RGB path Yb = Yrest*mask + Yorig*(1-mask)
-    cv::Mat Yblend, tmp;
-    cv::multiply(YrestCrop, mask, Yblend, 1.0, CV_32F);
-    cv::multiply(YorigCrop, invMask, tmp,   1.0, CV_32F);
-    cv::add(Yblend, tmp, Yblend, cv::noArray(), CV_32F);
-
-    // gain = Yblend / (Yorig + eps)
-    static constexpr float epsY = 1e-6f;
-    cv::Mat denomY; cv::add(YorigCrop, epsY, denomY);
-    cv::Mat gain;   cv::divide(Yblend, denomY, gain, 1.0, CV_32F);
-
-    // optional safety clamp on gain to avoid halos
-    //cv::min(gain, 3.0f, gain);  // e.g., cap at x3
-
-    // apply gain per channel on cropped ROI, clamp to [0,1]
-    for (int c = 0; c < 3; ++c) {
-        cv::Mat srcC = inputChannels[c](crop);
-        cv::Mat outC; cv::multiply(srcC, gain, outC, 1.0, CV_32F);
-        cv::max(outC, 0.0f, outC);
-        cv::min(outC, 1.0f, outC);
-        out[c] = outC.clone();
-    }
-
-    return out;
 }
 
 void Deblurrer::denoiseImage(cv::Mat& image, float strength = 10.0f, float edgeStrength = 0.4f) {
