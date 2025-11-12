@@ -41,7 +41,7 @@ class Deblurrer {
         cv::Mat buildWienerDenominator(const cv::Mat& psfMag2, const cv::Mat& snrMap, float snr, const cv::Mat& inputF, const cv::Mat& psf);
         std::array<cv::Mat, 3> splitInputChannels(const cv::Mat& inputF);
         cv::Mat createFeatherMask(cv::Size size);
-        std::array<cv::Mat, 3> deconvolve(const std::array<cv::Mat, 3>& inputChannels, const cv::Mat& psfConj, const cv::Mat& wienerDenom, const cv::Mat& hann, const cv::Mat& mask, const cv::Mat& originalInput, const cv::Mat& psf);
+        std::array<cv::Mat, 3> deconvolve(const std::array<cv::Mat, 3>& inputChannels, const cv::Mat& psfConj, const cv::Mat& wienerDenom, const cv::Mat& hann, const cv::Mat& originalInput, const cv::Mat& psf);
         inline const cv::Size getDFTSize(cv::Size s);
 
         // For testing purposes

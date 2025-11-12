@@ -382,10 +382,10 @@ cv::Mat createHannWindow2D(int rows, int cols) {
     return hannY * hannX;  // outer product to form 2D window
 }
 
+// works for odd/even; no cropping
 void Deblurrer::fftshift(cv::Mat& input) {
-    input = input(cv::Rect(0, 0, input.cols & -2, input.rows & -2));  // make even size
-    int cx = input.cols / 2;
-    int cy = input.rows / 2;
+    int cx = input.cols/2;
+    int cy = input.rows/2;
 
     cv::Mat q0(input, cv::Rect(0, 0, cx, cy));   // top-left
     cv::Mat q1(input, cv::Rect(cx, 0, cx, cy));  // top-right
@@ -450,15 +450,18 @@ cv::Mat Deblurrer::padInput(const cv::Mat& input, const cv::Mat& psf) {
 
     const int padY = psf.rows;
     const int padX = psf.cols;
-    cv::copyMakeBorder(inputF, inputF, padY, padY, padX, padX, cv::BORDER_REFLECT_101);
+    cv::copyMakeBorder(inputF, inputF, padY, padY, padX, padX, cv::BORDER_REPLICATE);
 
     const cv::Size want = getDFTSize(inputF.size());
-    const int addTop = 0, addLeft = 0;
     const int addBottom = want.height - inputF.rows;
     const int addRight  = want.width  - inputF.cols;
     if (addBottom > 0 || addRight > 0) {
-        cv::copyMakeBorder(inputF, inputF, addTop, addBottom, addLeft, addRight, cv::BORDER_REFLECT_101);
+        cv::copyMakeBorder(inputF, inputF, 0, addBottom, 0, addRight, cv::BORDER_REPLICATE);
     }
+
+    // if (inputF.rows & 1) cv::copyMakeBorder(inputF, inputF, 0, 1, 0, 0, cv::BORDER_REPLICATE);
+    // if (inputF.cols & 1) cv::copyMakeBorder(inputF, inputF, 0, 0, 0, 1, cv::BORDER_REPLICATE);
+
     return inputF;
 }
 
@@ -474,7 +477,7 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
     
     auto [psfConj, psfMag2] = psfConjMag(psfDFT);
 
-    cv::Mat snrMap = createSNRMap(inputF.size(), psf);
+    cv::Mat snrMap = createSNRMap(psfMag2.size(), psf);
 
     #ifdef DEBLUR_DEBUG
         visualizeMatrix(psfMag2, "psfMag2.png");
@@ -491,14 +494,8 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
 
     auto inputChannels = splitInputChannels(inputF);
     cv::Mat hann = createHannWindow2D(inputF.rows, inputF.cols);
-    cv::Mat mask;
-    if (blurLength >= 75.0f) {
-        mask = createFeatherMask(input.size());
-    } else {
-        mask = cv::Mat(input.size(), CV_32F, 1.0f);
-    }
 
-    std::array<cv::Mat, 3> outputChannels = deconvolve(inputChannels, psfConj, wienerDenom, hann, mask, input, psf);
+    std::array<cv::Mat, 3> outputChannels = deconvolve(inputChannels, psfConj, wienerDenom, hann, input, psf);
 
     if (outputChannels.size() == 1)
         output = outputChannels[0];
@@ -580,30 +577,15 @@ std::array<cv::Mat, 3> Deblurrer::splitInputChannels(const cv::Mat& inputF) {
     return inputChannels;
 }
 
-// causes blurring of image edges to hide artifacts in case of strong blur. higly questionable, but may be useful for blurLength <= 100 px + stitching
-cv::Mat Deblurrer::createFeatherMask(cv::Size size) {
-    MEASURE_FUNCTION();
-    cv::Mat mask(size, CV_32F, 1.0f);
-    int feather = std::min(60, std::min(size.width, size.height) / 10);
-    cv::rectangle(mask, cv::Rect(0, 0, size.width, feather), 0.0f, -1);
-    cv::rectangle(mask, cv::Rect(0, size.height - feather, size.width, feather), 0.0f, -1);
-    cv::rectangle(mask, cv::Rect(0, 0, feather, size.height), 0.0f, -1);
-    cv::rectangle(mask, cv::Rect(size.width - feather, 0, feather, size.height), 0.0f, -1);
-    cv::GaussianBlur(mask, mask, cv::Size(2 * feather + 1, 2 * feather + 1), feather);
-    return mask;
-}
-
-std::array<cv::Mat, 3> Deblurrer::deconvolve(const std::array<cv::Mat, 3>& inputChannels, const cv::Mat& psfConj, const cv::Mat& wienerDenom, const cv::Mat& hann, const cv::Mat& mask, const cv::Mat& originalInput, const cv::Mat& psf) {
+std::array<cv::Mat, 3> Deblurrer::deconvolve(const std::array<cv::Mat, 3>& inputChannels, const cv::Mat& psfConj, const cv::Mat& wienerDenom, const cv::Mat& hann, const cv::Mat& originalInput, const cv::Mat& psf) {
     std::array<cv::Mat, 3> outputChannels{};
     int padY = psf.rows;
     int padX = psf.cols;
 
     cv::parallel_for_(cv::Range(0, static_cast<int>(inputChannels.size())), [&](const cv::Range& range) {
         for (int i = range.start; i < range.end; ++i) {
-            cv::Mat chWin = inputChannels[i].mul(hann);
-
             cv::Mat imgDFT;
-            cv::dft(chWin, imgDFT, cv::DFT_COMPLEX_OUTPUT);
+            cv::dft(inputChannels[i].mul(hann), imgDFT, cv::DFT_COMPLEX_OUTPUT);
 
             cv::Mat filtered;
             cv::mulSpectrums(imgDFT, psfConj, filtered, 0);
@@ -632,7 +614,6 @@ std::array<cv::Mat, 3> Deblurrer::deconvolve(const std::array<cv::Mat, 3>& input
 
             restored = restored(cv::Rect(padX, padY, originalInput.cols, originalInput.rows));
             cv::Mat origCrop = inputChannels[i](cv::Rect(padX, padY, originalInput.cols, originalInput.rows));
-            restored = restored.mul(mask) + origCrop.mul(1.0f - mask);
 
             cv::min(restored, 1.0f, restored);
             cv::max(restored, 0.0f, restored);
