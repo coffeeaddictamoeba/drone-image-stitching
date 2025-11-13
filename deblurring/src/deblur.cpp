@@ -24,6 +24,8 @@
 #define YELLOW  "\033[33m"      // Warnings
 #define GREEN   "\033[32m"      // Success
 
+namespace md = metadata;
+
 Deblurrer::Deblurrer(DeblurConfig &config) { this->config_ = config; }
 
 
@@ -121,7 +123,7 @@ std::unordered_map<std::string, std::string> Deblurrer::createTestMetadata() {
     float roll = rollDist(gen);
     float exposure = exposureDist(gen);
 
-    std::unordered_map<std::string, std::string> metadata = {
+    std::unordered_map<std::string, std::string> md = {
         { "GPS Altitude", std::to_string(altitude) },
         { "GPS Speed", std::to_string(speed) },
         { "GPS Speed Ref", "km/h"},
@@ -135,45 +137,54 @@ std::unordered_map<std::string, std::string> Deblurrer::createTestMetadata() {
         { "Exposure Time", std::to_string(exposure) }
     };
 
-    #ifdef DEBUG
-    std::fputs("[INFO] Randomized metadata:\r\n", stdout);
-    for (const auto& kv : metadata) {
-        fprintf(
-            stdout,
-            "[INFO] %s = %s \r\n", kv.first.c_str(), kv.second.c_str()
-        );
-    }
-    #endif
-
-    return metadata;
+    return md;
 }
 
-void Deblurrer::saveImage(const cv::Mat &image, const fs::path& inputImagePath, const std::string &prefix) {
+// Saves the deblurred image with all metadata of input image
+void Deblurrer::saveImage(const cv::Mat &image, const fs::path& input, const std::string &prefix) {
     MEASURE_FUNCTION();
-    fs::path newImagePath = constructPathWithPrefix(inputImagePath, prefix);
+    fs::path output = constructPathWithPrefix(input, prefix);
 
     if (!config_.targetDir.empty()) {
         if (!fs::exists(config_.targetDir)) fs::create_directories(config_.targetDir);
-        newImagePath = constructPathWithNewDir(newImagePath, config_.targetDir);
+        output = constructPathWithNewDir(output, config_.targetDir);
     }
 
-    cv::imwrite(newImagePath, image);
-    copyMetadata(inputImagePath, newImagePath);
+    cv::imwrite(output, image);
+    md::copyAll(input, output);
 
     fprintf(
         stdout,
-        "[INFO] Final image is saved to: %s \r\n", newImagePath.c_str()
+        "[INFO] Final image is saved to: %s \r\n", output.c_str()
+    );
+}
+
+// Saves the deblurred image with raw metadata
+void Deblurrer::saveImage(const cv::Mat &image, const fs::path& input, const std::unordered_map<std::string, std::string>& md, const std::string &prefix) {
+    MEASURE_FUNCTION();
+    fs::path output = constructPathWithPrefix(input, prefix);
+
+    if (!config_.targetDir.empty()) {
+        if (!fs::exists(config_.targetDir)) fs::create_directories(config_.targetDir);
+        output = constructPathWithNewDir(output, config_.targetDir);
+    }
+
+    cv::imwrite(output, image);
+    md::copyAll(md, output);
+
+    fprintf(
+        stdout,
+        "[INFO] Final image is saved to: %s \r\n", output.c_str()
     );
 }
 
 // Generates initial and blurred test images
-void Deblurrer::generateTest(const fs::path& testOutputPath) {
+void Deblurrer::generateTest(const fs::path& output) {
     MEASURE_FUNCTION();
-    if (!testOutputPath.empty()) config_.testImagePath = testOutputPath;
+    if (!output.empty()) config_.testImagePath = output;
 
     cv::imwrite(config_.testImagePath, createTestImage());
-
-    assignMetadata(config_.testImagePath, createTestMetadata());
+    md::copyAll(createTestMetadata(), config_.testImagePath);
 
     blurImage(config_.testImagePath, false);
 }
@@ -213,12 +224,12 @@ bool Deblurrer::isBlurred(const cv::Mat &image, float blurThreshold = 100.0f, in
 }
 
 // Checks if image is blurred (by image path)
-bool Deblurrer::isBlurred(const fs::path &imagePath, float blurThreshold = 100.0f) {
-    cv::Mat image = cv::imread(imagePath, cv::IMREAD_COLOR);
+bool Deblurrer::isBlurred(const fs::path &imgpath, float blurThreshold = 100.0f) {
+    cv::Mat image = cv::imread(imgpath, cv::IMREAD_COLOR);
     if (image.empty()) {
         fprintf(
             stderr, 
-            RED "[ERROR] Failed to load image from %s \r\n" RESET, imagePath.c_str()
+            RED "[ERROR] Failed to load image from %s \r\n" RESET, imgpath.c_str()
         );
         return false;
     }
@@ -226,27 +237,25 @@ bool Deblurrer::isBlurred(const fs::path &imagePath, float blurThreshold = 100.0
 }
 
 // Blur input image (works for both real and test-generated images)
-void Deblurrer::blurImage(const fs::path &inputImagePath, bool grayscale) {
+void Deblurrer::blurImage(const fs::path& imgpath, bool grayscale) {
     MEASURE_FUNCTION();
     int imreadFlag = grayscale ? cv::IMREAD_GRAYSCALE : cv::IMREAD_COLOR;
 
-    cv::Mat normal = cv::imread(inputImagePath, imreadFlag);
+    cv::Mat normal = cv::imread(imgpath, imreadFlag);
     if (normal.empty()) {
         fprintf(
             stderr, 
-            RED "[ERROR] Failed to load image: %s \r\n" RESET, inputImagePath.c_str()
+            RED "[ERROR] Failed to load image: %s \r\n" RESET, imgpath.c_str()
         );
         return; 
     }
 
-    if (config_.overwriteMetadata) {
-        auto metadata = createTestMetadata();
-        assignMetadata(inputImagePath, metadata);
-    }
+    if (config_.overwriteMetadata) md::copyAll(createTestMetadata(), imgpath);
 
-    int blurLength;
-    float blurAngleRad;
-    findBlurLength(inputImagePath, blurLength, blurAngleRad);
+    auto md = md::extractAll(imgpath);
+
+    int blurLength; float blurAngleRad;
+    findBlurLength(imgpath, blurLength, blurAngleRad, md);
 
     cv::Mat psf;
     estimatePSF(blurLength, blurAngleRad, psf);
@@ -254,26 +263,20 @@ void Deblurrer::blurImage(const fs::path &inputImagePath, bool grayscale) {
     cv::Mat blurred;
     filter2D(normal, blurred, -1, psf, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
 
-    saveImage(blurred, inputImagePath, "_blurred");
+    saveImage(blurred, imgpath, md, "_blurred");
 }
 
 
 // -------------------- IMAGE DEBLURRING -----------------------
 
 // Finds blur length by image metadata
-void Deblurrer::findBlurLength(const fs::path &imagePath, int &blurLength, float &blurAngleRad) { // px
+void Deblurrer::findBlurLength(const fs::path& imgpath, int& blurLength, float& blurAngleRad, std::unordered_map<std::string, std::string>& md) { // px
     MEASURE_FUNCTION();
-    auto metadata = extractImageMetadata(imagePath);
-
     try {
-        // Exposure Time in EXIF format most of the time looks like "1/10", so it is important to parse it properly
-        float exposure = parseExifExposureTime(metadata["Exposure Time"]);
-        float gsd = findGSD(metadata, config_.sensorWidth, config_.sensorHeight);
+        float exposure = 0.0f; md::tagAsFloat(md, "Exposure Time", exposure);
+        float gsd = md::findGSD(md, config_.sensorWidth, config_.sensorHeight);
     
-        float Vx, Vy, Vz, speed;
-        findVBodies(metadata, Vx, Vy, Vz, speed);
-    
-        blurAngleRad = std::atan2(Vz, Vy);
+        float Vx, Vy, Vz, speed; findVBodies(md, Vx, Vy, Vz, speed);
     
         float blur = speed * 1000.0f * exposure;       // mm
         blurLength = static_cast<int>(blur / gsd);     // px
@@ -285,15 +288,15 @@ void Deblurrer::findBlurLength(const fs::path &imagePath, int &blurLength, float
     
         blurLength = (blurLength > 1) ? blurLength : 1; // px
     } catch (const std::exception& e) {
-        listMetadata();
+        md::listMetadata();
     }
 }
 
-void Deblurrer::findVBodies(const std::unordered_map<std::string, std::string> &metadata, float &Vx, float &Vy, float &Vz, float &speed) {
+void Deblurrer::findVBodies(const std::unordered_map<std::string, std::string>& md, float& Vx, float& Vy, float& Vz, float& speed) {
     float speedX, speedY, speedZ, yawRad, pitchRad, rollRad, exposure, gpsImgDirection;
 
-    getPitchRollYawRad(metadata, pitchRad, rollRad, yawRad);
-    getSpeedXYZ(metadata, speedX, speedY, speedZ); // in case where only GPS Speed is present, the result is stored in speedX
+    md::getPitchRollYawRad(md, pitchRad, rollRad, yawRad);
+    md::getSpeedXYZ(md, speedX, speedY, speedZ); // in case where only GPS Speed is present, the result is stored in speedX
 
     float cy = std::cos(yawRad);   float sy = std::sin(yawRad);
     float cp = std::cos(pitchRad); float sp = std::sin(pitchRad);
@@ -313,7 +316,7 @@ void Deblurrer::findVBodies(const std::unordered_map<std::string, std::string> &
         Vz = speedX * (cr * sp * cy + sr * sy) + speedY * (cr * sp * sy - sr * cy) + speedZ * (cr * cp);
         speed = std::sqrt(Vy * Vy + Vz * Vz);
     } else {
-        gpsImgDirection = getGPSImgDirectionRad(metadata); // radians
+        gpsImgDirection = md::getGPSImgDirectionRad(md); // radians
 
         float vx = std::cos(gpsImgDirection);
         float vy = std::sin(gpsImgDirection);
@@ -458,9 +461,6 @@ cv::Mat Deblurrer::padInput(const cv::Mat& input, const cv::Mat& psf) {
     if (addBottom > 0 || addRight > 0) {
         cv::copyMakeBorder(inputF, inputF, 0, addBottom, 0, addRight, cv::BORDER_REPLICATE);
     }
-
-    // if (inputF.rows & 1) cv::copyMakeBorder(inputF, inputF, 0, 1, 0, 0, cv::BORDER_REPLICATE);
-    // if (inputF.cols & 1) cv::copyMakeBorder(inputF, inputF, 0, 0, 0, 1, cv::BORDER_REPLICATE);
 
     return inputF;
 }
@@ -656,13 +656,13 @@ void Deblurrer::denoiseImage(cv::Mat& image, float strength = 10.0f, float edgeS
     }
 }
 
-void Deblurrer::deblurImage(const fs::path &inputImagePath, float snr = 1500.0) {
+void Deblurrer::deblurImage(const fs::path& imgpath, float snr = 1500.0) {
     MEASURE_FUNCTION();
-    cv::Mat blurred = cv::imread(inputImagePath);
+    cv::Mat blurred = cv::imread(imgpath);
     if (blurred.empty()) {
         fprintf(
             stderr,
-            RED "[ERROR] Failed to load image: %s \r\n" RESET, inputImagePath.c_str()
+            RED "[ERROR] Failed to load image: %s \r\n" RESET, imgpath.c_str()
         );
         return;
     }
@@ -671,15 +671,16 @@ void Deblurrer::deblurImage(const fs::path &inputImagePath, float snr = 1500.0) 
         if (!isBlurred(blurred, config_.blurThreshold)) {
             fprintf(
                 stdout,
-                "[INFO] The image %s is normal. Skipping deblurring. \r\n", inputImagePath.c_str()
+                "[INFO] The image %s is normal. Skipping deblurring. \r\n", imgpath.c_str()
             );
             return;
         }
     }    
 
-    int blurLength;
-    float blurAngleRad;
-    findBlurLength(inputImagePath, blurLength, blurAngleRad);
+    auto md = md::extractAll(imgpath);
+
+    int blurLength; float blurAngleRad;
+    findBlurLength(imgpath, blurLength, blurAngleRad, md);
 
     if (!blurLength) {
         fputs(
@@ -689,8 +690,7 @@ void Deblurrer::deblurImage(const fs::path &inputImagePath, float snr = 1500.0) 
         return;
     }
 
-    cv::Mat psf;
-    estimatePSF(blurLength, blurAngleRad, psf); // normalized automatically
+    cv::Mat psf; estimatePSF(blurLength, blurAngleRad, psf); // normalized automatically
 
     cv::Mat deblurred;
     wienerDeconvolution(blurred, psf, deblurred, blurLength, snr);
@@ -710,5 +710,5 @@ void Deblurrer::deblurImage(const fs::path &inputImagePath, float snr = 1500.0) 
         }
     }
 
-    saveImage(deblurred, inputImagePath, "_deblurred");
+    saveImage(deblurred, imgpath, md, "_deblurred"); // faster that copying from img to img
 }
