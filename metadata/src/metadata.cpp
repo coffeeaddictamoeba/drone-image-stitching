@@ -72,7 +72,6 @@ namespace metadata {
                 return true;
             } else {
                 value = std::stof(it->second);
-                std::cout << "Key: " << it->first << " Value: " << it->second << "\n";
                 return true;
             }
         } catch (...) {
@@ -272,7 +271,7 @@ namespace metadata {
 
     // Finds GSD from given metadata (mm/px)
     float findGSD(const std::unordered_map<std::string, std::string>& metadata, float sensorWidth = 3.68f, float sensorHeight = 2.76f) {
-        float alt = 0, flen = 0;
+        float alt = 0.0f, flen = 0.0f;
         int width = 0, height = 0;
 
         if (!tagAsFloat(metadata, "GPS Altitude", alt) || !tagAsFloat(metadata, "Focal Length", flen) ||

@@ -277,6 +277,8 @@ void Deblurrer::findBlurLength(const fs::path& imgpath, int& blurLength, float& 
         float gsd = md::findGSD(md, config_.sensorWidth, config_.sensorHeight);
     
         float Vx, Vy, Vz, speed; findVBodies(md, Vx, Vy, Vz, speed);
+
+        blurAngleRad = std::atan2(Vz, Vy);
     
         float blur = speed * 1000.0f * exposure;       // mm
         blurLength = static_cast<int>(blur / gsd);     // px
