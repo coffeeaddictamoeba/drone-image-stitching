@@ -3,13 +3,13 @@
 
 #include "../include/deblur.h"
 
-#include <array>
 #include <opencv2/core/ocl.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/highgui.hpp>
 
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -28,12 +28,8 @@ namespace md = metadata;
 
 Deblurrer::Deblurrer(DeblurConfig &config) { this->config_ = config; }
 
-
-// -------------------- TEST IMAGE GENERATION AND BLUR -----------------------
-
 // Creates random test image
 cv::Mat Deblurrer::createTestImage(int width = 640, int height = 480) {
-    MEASURE_FUNCTION();
     cv::Mat canvas(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
 
     std::random_device rd;
@@ -96,50 +92,6 @@ cv::Mat Deblurrer::createTestImage(int width = 640, int height = 480) {
     return canvas;
 }
 
-// Creates random metadata to assign
-std::unordered_map<std::string, std::string> Deblurrer::createTestMetadata() {
-    MEASURE_FUNCTION();
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<> altitudeDist(50.0, 250.0);            // meters
-    std::uniform_real_distribution<> focalLengthDist(2.0, 5.0);            // mm
-    std::uniform_real_distribution<> speedDist(10.0, 25.0);                // km/h
-    std::uniform_real_distribution<> speedXDist(10.0, 25.0);               // m/s
-    std::uniform_real_distribution<> speedYDist(10.0, 25.0);               // m/s
-    std::uniform_real_distribution<> speedZDist(10.0, 25.0);               // m/s
-    std::uniform_real_distribution<> yawDist(0.0, 360.0);                  // degrees
-    std::uniform_real_distribution<> pitchDist(0.0, 360.0);                // degrees
-    std::uniform_real_distribution<> rollDist(0.0, 360.0);                 // degrees
-    std::uniform_real_distribution<> exposureDist(1.0 / 10.0, 1.0 / 5.0);  // seconds
-
-    float altitude = altitudeDist(gen);
-    float focalLength = focalLengthDist(gen);
-    float speed = speedDist(gen);
-    float speedX = speedXDist(gen);
-    float speedY = speedYDist(gen);
-    float speedZ = speedZDist(gen);
-    float yaw = yawDist(gen);
-    float pitch = pitchDist(gen);
-    float roll = rollDist(gen);
-    float exposure = exposureDist(gen);
-
-    std::unordered_map<std::string, std::string> md = {
-        { "GPS Altitude", std::to_string(altitude) },
-        { "GPS Speed", std::to_string(speed) },
-        { "GPS Speed Ref", "km/h"},
-        { "XMP-drone-dji:Flight X Speed", std::to_string(speedX) },
-        { "XMP-drone-dji:Flight Y Speed", std::to_string(speedY) },
-        { "XMP-drone-dji:Flight Z Speed", std::to_string(speedZ) },
-        { "Focal Length", std::to_string(focalLength) },
-        { "Flight Yaw Degree", std::to_string(yaw) },
-        { "Flight Pitch Degree", std::to_string(pitch) },
-        { "Flight Roll Degree", std::to_string(roll) },
-        { "Exposure Time", std::to_string(exposure) }
-    };
-
-    return md;
-}
-
 // Saves the deblurred image with all metadata of input image
 void Deblurrer::saveImage(const cv::Mat &image, const fs::path& input, const std::string &prefix) {
     MEASURE_FUNCTION();
@@ -180,11 +132,10 @@ void Deblurrer::saveImage(const cv::Mat &image, const fs::path& input, const std
 
 // Generates initial and blurred test images
 void Deblurrer::generateTest(const fs::path& output) {
-    MEASURE_FUNCTION();
     if (!output.empty()) config_.testImagePath = output;
 
     cv::imwrite(config_.testImagePath, createTestImage());
-    md::copyAll(createTestMetadata(), config_.testImagePath);
+    md::copyAll(md::getRandom(), config_.testImagePath);
 
     blurImage(config_.testImagePath, false);
 }
@@ -250,11 +201,12 @@ void Deblurrer::blurImage(const fs::path& imgpath, bool grayscale) {
         return; 
     }
 
-    if (config_.overwriteMetadata) md::copyAll(createTestMetadata(), imgpath);
+    if (config_.overwriteMetadata) md::copyAll(md::getRandom(), imgpath);
 
     auto md = md::extractAll(imgpath);
 
-    int blurLength; float blurAngleRad;
+    int blurLength = 0;
+    float blurAngleRad = 0.0f;
     findBlurLength(imgpath, blurLength, blurAngleRad, md);
 
     cv::Mat psf;
@@ -266,12 +218,8 @@ void Deblurrer::blurImage(const fs::path& imgpath, bool grayscale) {
     saveImage(blurred, imgpath, md, "_blurred");
 }
 
-
-// -------------------- IMAGE DEBLURRING -----------------------
-
 // Finds blur length by image metadata
 void Deblurrer::findBlurLength(const fs::path& imgpath, int& blurLength, float& blurAngleRad, std::unordered_map<std::string, std::string>& md) { // px
-    MEASURE_FUNCTION();
     try {
         float exposure = 0.0f; md::tagAsFloat(md, "Exposure Time", exposure);
         float gsd = md::findGSD(md, config_.sensorWidth, config_.sensorHeight);
@@ -370,7 +318,6 @@ void Deblurrer::estimatePSF(int blurLengthPx, float blurAngleRad, cv::Mat& psf) 
 }
 
 cv::Mat createHannWindow2D(int rows, int cols) {
-    MEASURE_FUNCTION();
     if (rows < 2 || cols < 2) {
         return cv::Mat::ones(std::max(1, rows), std::max(1, cols), CV_32F);
     }
@@ -403,7 +350,6 @@ void Deblurrer::fftshift(cv::Mat& input) {
 }
 
 cv::Mat Deblurrer::psfdft(const cv::Mat& normPSF, cv::Size targetSize) {
-    MEASURE_FUNCTION();
     cv::Mat paddedPSF(targetSize, CV_32F);
     paddedPSF.setTo(0);
 
@@ -421,7 +367,6 @@ cv::Mat Deblurrer::psfdft(const cv::Mat& normPSF, cv::Size targetSize) {
 }
 
 std::pair<cv::Mat, cv::Mat> Deblurrer::psfConjMag(const cv::Mat& psfDFT) {
-    MEASURE_FUNCTION();
     std::array<cv::Mat, 2> psfPlanes{};
     cv::split(psfDFT, psfPlanes);
 
@@ -449,9 +394,7 @@ inline const cv::Size Deblurrer::getDFTSize(cv::Size s) {
 }
 
 cv::Mat Deblurrer::padInput(const cv::Mat& input, const cv::Mat& psf) {
-    MEASURE_FUNCTION();
-    cv::Mat inputF;
-    input.convertTo(inputF, CV_32FC3, 1.0f / 255.0f);
+    cv::Mat inputF; input.convertTo(inputF, CV_32FC3, 1.0f/255.0f);
 
     const int padY = psf.rows;
     const int padX = psf.cols;
@@ -470,7 +413,10 @@ cv::Mat Deblurrer::padInput(const cv::Mat& input, const cv::Mat& psf) {
 void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv::Mat& output, float blurLength, float snr) {
     MEASURE_FUNCTION();
     if (input.empty() || psf.empty()) {
-        std::fputs(RED "[ERROR] Input or PSF is empty. \r\n" RESET, stderr);
+        std::fputs(
+            RED "[ERROR] Input or PSF is empty. \r\n" RESET, 
+            stderr
+        );
         return;
     }
 
@@ -483,7 +429,6 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
 
     #ifdef DEBLUR_DEBUG
         visualizeMatrix(psfMag2, "psfMag2.png");
-        countMatrixZeros(psfMag2, "psfMag");
     #endif
 
     cv::Mat wienerDenom = buildWienerDenominator(psfMag2, snrMap, snr, inputF, psf);
@@ -491,7 +436,6 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
     #ifdef DEBLUR_DEBUG
         visualizeMatrix(snrMap, "snrMap.png");
         visualizeMatrix(wienerDenom, "wienerDenom.png");
-        countMatrixZeros(wienerDenom, "wienerDenom");
     #endif
 
     auto inputChannels = splitInputChannels(inputF);
@@ -508,7 +452,6 @@ void Deblurrer::wienerDeconvolution(const cv::Mat& input, const cv::Mat& psf, cv
 }
 
 cv::Mat Deblurrer::createSNRMap(cv::Size size, const cv::Mat& psf) {
-    MEASURE_FUNCTION();
     cv::Mat snrMap(size, CV_32F);
     cv::Point center(size.width / 2, size.height / 2);
     float maxDist = std::sqrt(center.x * center.x + center.y * center.y);
@@ -532,7 +475,6 @@ cv::Mat Deblurrer::createSNRMap(cv::Size size, const cv::Mat& psf) {
 }
 
 cv::Mat Deblurrer::buildWienerDenominator(const cv::Mat& psfMag2, const cv::Mat& snrMap, float snr, const cv::Mat& inputF, const cv::Mat& psf) {
-    MEASURE_FUNCTION();
     cv::Mat snrWeight = 1.0f / (snrMap * snr + 1e-6f);
     cv::Mat wienerDenom = psfMag2 + snrWeight;
 
@@ -568,14 +510,11 @@ cv::Mat Deblurrer::buildWienerDenominator(const cv::Mat& psfMag2, const cv::Mat&
 }
 
 std::array<cv::Mat, 3> Deblurrer::splitInputChannels(const cv::Mat& inputF) {
-    MEASURE_FUNCTION();
-    int i = 0;
     std::array<cv::Mat, 3> inputChannels;
-    if (inputF.channels() == 1) {
-        inputChannels[i++] = inputF;
-    } else {
+    if (inputF.channels() == 1)
+        inputChannels[0] = inputF;
+    else 
         cv::split(inputF, inputChannels);
-    }
     return inputChannels;
 }
 
@@ -597,7 +536,6 @@ std::array<cv::Mat, 3> Deblurrer::deconvolve(const std::array<cv::Mat, 3>& input
 
             #ifdef DEBLUR_DEBUG
                 visualizeMagnitude(filtered, "filtered.png");
-                countMatrixZeros(filtered, "filtered");
             #endif
 
             cv::Mat safeMask = (wienerDenom > 1e-3f);
@@ -620,11 +558,6 @@ std::array<cv::Mat, 3> Deblurrer::deconvolve(const std::array<cv::Mat, 3>& input
             cv::min(restored, 1.0f, restored);
             cv::max(restored, 0.0f, restored);
 
-            #ifdef DEBLUR_DEBUG
-                visualizeMatrix(restored, "restored.png");
-                countMatrixZeros(restored, "restored");
-            #endif
-
             outputChannels[i] = restored;
         }
     });
@@ -632,7 +565,7 @@ std::array<cv::Mat, 3> Deblurrer::deconvolve(const std::array<cv::Mat, 3>& input
     return outputChannels;
 }
 
-void Deblurrer::denoiseImage(cv::Mat& image, float strength = 10.0f, float edgeStrength = 0.4f) {
+void Deblurrer::denoiseImage(cv::Mat& image, float strength = 7.0f, float edgeStrength = 0.4f) {
     MEASURE_FUNCTION();
     if (image.empty()) {
         std::fputs(
@@ -681,7 +614,8 @@ void Deblurrer::deblurImage(const fs::path& imgpath, float snr = 1500.0) {
 
     auto md = md::extractAll(imgpath);
 
-    int blurLength; float blurAngleRad;
+    int blurLength = 0;
+    float blurAngleRad = 0.0f;
     findBlurLength(imgpath, blurLength, blurAngleRad, md);
 
     if (!blurLength) {
@@ -694,8 +628,7 @@ void Deblurrer::deblurImage(const fs::path& imgpath, float snr = 1500.0) {
 
     cv::Mat psf; estimatePSF(blurLength, blurAngleRad, psf); // normalized automatically
 
-    cv::Mat deblurred;
-    wienerDeconvolution(blurred, psf, deblurred, blurLength, snr);
+    cv::Mat deblurred; wienerDeconvolution(blurred, psf, deblurred, blurLength, snr);
 
     if (config_.denoise) {
         if (!deblurred.empty()) {

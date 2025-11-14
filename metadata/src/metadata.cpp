@@ -1,4 +1,5 @@
 #include <iostream>
+#include <random>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -158,6 +159,48 @@ namespace metadata {
             if (!line.empty()) return line;
         }
         return std::string{};
+    }
+
+    // Creates random metadata map (for testing only)
+    std::unordered_map<std::string, std::string> getRandom() {
+        MEASURE_FUNCTION();
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_real_distribution<> altitudeDist(50.0, 250.0);            // meters
+        std::uniform_real_distribution<> focalLengthDist(2.0, 5.0);            // mm
+        std::uniform_real_distribution<> speedDist(10.0, 25.0);                // km/h
+        std::uniform_real_distribution<> speedXDist(10.0, 25.0);               // m/s
+        std::uniform_real_distribution<> speedYDist(10.0, 25.0);               // m/s
+        std::uniform_real_distribution<> speedZDist(10.0, 25.0);               // m/s
+        std::uniform_real_distribution<> yawDist(0.0, 360.0);                  // degrees
+        std::uniform_real_distribution<> pitchDist(0.0, 360.0);                // degrees
+        std::uniform_real_distribution<> rollDist(0.0, 360.0);                 // degrees
+        std::uniform_real_distribution<> exposureDist(1.0 / 10.0, 1.0 / 5.0);  // seconds
+
+        float altitude = altitudeDist(gen);
+        float focalLength = focalLengthDist(gen);
+        float speed = speedDist(gen);
+        float speedX = speedXDist(gen);
+        float speedY = speedYDist(gen);
+        float speedZ = speedZDist(gen);
+        float yaw = yawDist(gen);
+        float pitch = pitchDist(gen);
+        float roll = rollDist(gen);
+        float exposure = exposureDist(gen);
+
+        return {
+            { "GPS Altitude", std::to_string(altitude) },
+            { "GPS Speed", std::to_string(speed) },
+            { "GPS Speed Ref", "km/h"},
+            { "XMP-drone-dji:Flight X Speed", std::to_string(speedX) },
+            { "XMP-drone-dji:Flight Y Speed", std::to_string(speedY) },
+            { "XMP-drone-dji:Flight Z Speed", std::to_string(speedZ) },
+            { "Focal Length", std::to_string(focalLength) },
+            { "Flight Yaw Degree", std::to_string(yaw) },
+            { "Flight Pitch Degree", std::to_string(pitch) },
+            { "Flight Roll Degree", std::to_string(roll) },
+            { "Exposure Time", std::to_string(exposure) }
+        };
     }
 
     void copyAll(const std::string& srcpath, const std::string& dstpath) {

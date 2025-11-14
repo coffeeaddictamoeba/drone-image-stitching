@@ -278,6 +278,8 @@ namespace metadata {
     void copyAll(const std::string& srcpath, const std::string& dstpath);
     void copyAll(const std::unordered_map<std::string, std::string>& md, const std::string& imgpath);
 
+    std::unordered_map<std::string, std::string> getRandom();
+
     void getPitchRollYaw(const std::unordered_map<std::string, std::string>& md, float &pitch, float &roll, float &yaw);
     void getPitchRollYawRad(const std::unordered_map<std::string, std::string> &md, float &pitchRad, float &rollRad, float &yawRad);
     void getSpeedXYZ(const std::unordered_map<std::string, std::string> &md, float &speedX, float &speedY, float &speedZ);
