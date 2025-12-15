@@ -35,7 +35,7 @@
             # docker exec dind docker pull opendronemap/odm
             # (Verify) docker exec dind docker images
             
-    # sudo docker build -t drone-image-stitching .
+    # sudo docker build --build-arg USER_ID = ${id -u} --build-arg GROUP_ID = ${id -g} -t drone-image-stitching .
         
     # Run app container with Docker socket and host images
         # docker run -it --rm \
