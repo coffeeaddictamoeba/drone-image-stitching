@@ -34,10 +34,12 @@
         # Install OpenDroneMap to DinD:
             # docker exec dind docker pull opendronemap/odm
             # (Verify) docker exec dind docker images
+            
+    # sudo docker build -t drone-image-stitching .
         
     # Run app container with Docker socket and host images
         # docker run -it --rm \
-        # --link dind:docker" \
+        # --link dind:docker \
         # -v /absolute/path/to/your/project/root:/someproject \
         # -e DOCKER_HOST=tcp://docker:2375 \
         # --user $(id -u):$(id -g) \
