@@ -18,7 +18,7 @@ target_include_directories(stitching_exec PRIVATE
 
 target_link_libraries(stitching_exec 
     PUBLIC
-        libmetadata::libmetadata
+        metadata::metadata
     PRIVATE
         ${GDAL_LIBRARIES}
         ${OpenCV_LIBRARIES}

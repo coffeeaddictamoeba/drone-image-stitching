@@ -24,7 +24,6 @@ struct DeblurConfig {
     bool denoise = false;
     bool forceDeblurring = false;
     bool monitorDir = false;
-    bool fast = false;
 };
 
 #endif
