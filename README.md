@@ -6,6 +6,8 @@ This is an application for fast, lightweight and secure drone image stitching.
 
 ---
 
+**NOTE:** If running with Docker, the only dependency is the Docker itself.
+
 - [OpenDroneMap (ODM)](https://github.com/OpenDroneMap/ODM)
 - [Orfeo ToolBox (OTB)](https://github.com/orfeotoolbox/OTB) - [List of prebuilt packages here](https://orfeo-toolbox.org/packages/)
 - [ExifTool](https://exiftool.org/)
@@ -15,6 +17,35 @@ This is an application for fast, lightweight and secure drone image stitching.
 - OpenJP2 and PROJ for GDAL
 
 **NOTE:** This project uses ODM by Docker and OTB CLI (https://www.orfeo-toolbox.org/CookBook/CliInterface.html). Packages are available at https://orfeo-toolbox.org/packages/ with exact package used in this project https://orfeo-toolbox.org/packages/OTB-9.1.0-Linux.tar.gz
+
+### Running the App with Docker
+
+For the simplified setup, use  `dockersetup.sh`:
+
+```
+chmod +x dockersetup.sh && ./dockersetup.sh
+```
+
+This script automates the project build and has several options:
+
+```
+./dockersetup.sh [--force[=app|dind]]
+```
+
+Options:
+
+- `--force` - rebuilds all images in the setup process
+- `--force=app` - rebuilds app in the setup process
+- `--force=dind` - rebuilds DinD container in the setup process (does not rebuild the app)
+
+**NOTE:** Using DinD for the app setup was experimental, and in future it may be better to use separate ODM container and run it as-is.
+
+Current `dockersetup.sh` pipeline:
+
+- Builds both `stitching` and `deblurring` part in the same container.
+- At this point, `deblurring` is ready.
+- However, `stitching` requires Docker ODM image. For this, we run DinD container to run ODM inside original container.
+- In future updates it is important to test alternative options of running ODM inside the container, such as using non-dockerized ODM app or using dockerized ODM outside the app container if possible.
 
 ### How to Build
 

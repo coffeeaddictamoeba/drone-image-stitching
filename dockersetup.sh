@@ -19,7 +19,6 @@ USER_ID=$(id -u)
 GROUP_ID=$(id -g)
 DOCKER_PORT=2375
 DOCKER_HOST_ADDR="tcp://docker:${DOCKER_PORT}"
-HOST_DOCKER_HOST="tcp://localhost:${DOCKER_PORT}"
 PROJECT_MOUNT_POINT="/prototype"
 
 FORCE_MODE=""
@@ -45,21 +44,30 @@ fi
 if [[ "$FORCE_MODE" == "all" || "$FORCE_MODE" == "app" ]]; then
     info "Force rebuilding app image..."
     docker build --no-cache \
-        --build-arg USER_ID=${USER_ID} \
-        --build-arg GROUP_ID=${GROUP_ID} \
-        --build-arg PROJECT_MOUNT_POINT=${PROJECT_MOUNT_POINT} \
+        --build-arg USER_ID="${USER_ID}" \
+        --build-arg GROUP_ID="${GROUP_ID}" \
+        --build-arg PROJECT_MOUNT_POINT="${PROJECT_MOUNT_POINT}" \
         -t "${APP_IMAGE}" .
+elif ! docker image inspect "${APP_IMAGE}" >/dev/null 2>&1; then
+    info "App image '${APP_IMAGE}' not found. Building it..."
+    docker build \
+        --build-arg USER_ID="${USER_ID}" \
+        --build-arg GROUP_ID="${GROUP_ID}" \
+        --build-arg PROJECT_MOUNT_POINT="${PROJECT_MOUNT_POINT}" \
+        -t "${APP_IMAGE}" .
+else
+    info "App image '${APP_IMAGE}' already exists."
 fi
 
 if ! docker ps -a --format '{{.Names}}' | grep -q "^${DIND_NAME}$"; then
     info "Creating DinD container (tcp://0.0.0.0:${DOCKER_PORT})..."
     docker run -d --privileged --name "${DIND_NAME}" \
         -e DOCKER_TLS_CERTDIR="" \
-        -p ${DOCKER_PORT}:${DOCKER_PORT} \
+        -p "${DOCKER_PORT}:${DOCKER_PORT}" \
         -v /var/lib/docker \
         -v "${PROJECT_DIR}:${PROJECT_MOUNT_POINT}" \
         docker:dind dockerd \
-        -H tcp://0.0.0.0:${DOCKER_PORT} \
+        -H "tcp://0.0.0.0:${DOCKER_PORT}" \
         -H unix:///var/run/docker.sock >/dev/null
     info "Waiting for Docker inside DinD to be ready..."
     until docker exec "${DIND_NAME}" docker info >/dev/null 2>&1; do
@@ -69,6 +77,8 @@ else
     if [ -z "$(docker ps -q -f name="^${DIND_NAME}$")" ]; then
         info "Starting stopped DinD container..."
         docker start "${DIND_NAME}" >/dev/null
+
+        info "Waiting for Docker inside DinD to be ready..."
         until docker exec "${DIND_NAME}" docker info >/dev/null 2>&1; do
             sleep 2
         done
@@ -78,12 +88,12 @@ else
 fi
 
 info "Ensuring matching user (${USER_ID}:${GROUP_ID}) inside DinD..."
-docker exec "${DIND_NAME}" sh <<'EOF'
-addgroup --gid '"${GROUP_ID}"' somegroup 2>/dev/null || true
-adduser --disabled-password --uid '"${USER_ID}"' --gid '"${GROUP_ID}"' --gecos "" someuser 2>/dev/null || true
+docker exec "${DIND_NAME}" sh <<EOF
+addgroup --gid "${GROUP_ID}" somegroup 2>/dev/null || true
+adduser --disabled-password --uid "${USER_ID}" --gid "${GROUP_ID}" --gecos "" someuser 2>/dev/null || true
 EOF
 
-if docker exec "${DIND_NAME}" docker images --format '{{.Repository}}' | grep -q "^${ODM_IMAGE}$"; then
+if docker exec "${DIND_NAME}" docker image inspect "${ODM_IMAGE}" >/dev/null 2>&1; then
     info "ODM image '${ODM_IMAGE}' already present in DinD."
 else
     info "Pulling ODM image '${ODM_IMAGE}' inside DinD..."
@@ -92,8 +102,8 @@ fi
 
 info "Launching app container with DOCKER_HOST=${DOCKER_HOST_ADDR}..."
 docker run -it --rm \
-  --link "${DIND_NAME}:docker" \
-  -v "${PROJECT_DIR}:${PROJECT_MOUNT_POINT}" \
-  -e DOCKER_HOST="${DOCKER_HOST_ADDR}" \
-  --user "${USER_ID}:${GROUP_ID}" \
-  "${APP_IMAGE}"
+    --link "${DIND_NAME}:docker" \
+    -v "${PROJECT_DIR}:${PROJECT_MOUNT_POINT}" \
+    -e DOCKER_HOST="${DOCKER_HOST_ADDR}" \
+    --user "${USER_ID}:${GROUP_ID}" \
+    "${APP_IMAGE}"
